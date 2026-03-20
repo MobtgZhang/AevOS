@@ -5,15 +5,26 @@ without Linux or any other host OS. It boots via UEFI, manages its own memory
 and scheduling, embeds an LLM inference runtime (based on llama.cpp concepts),
 and provides a Cursor-style shell UI — all from power-on in under 2 seconds.
 
+## Screenshot
+
+The framebuffer shell (dark theme, sidebar, AI chat, terminal, and status bar):
+
+![AevOS shell UI](asserts/screenshots.png)
+
+## Documentation
+
+- [English](docs/en/README.md) — features, build, run, and boot configuration
+- [简体中文](docs/zh/README.md) — 同上（中文）
+
 ## Architecture
 
 ```
 ┌──────────────────────────────────────────────────────┐
 │  Layer 4 — AevOS Shell (Cursor-style framebuffer UI) │
 ├──────────────────────────────────────────────────────┤
-│  Layer 3 — LLM Runtime (GGUF, Q4/Q8, SIMD inference)│
+│  Layer 3 — AI Agent Core (History / Memory / Skills) │
 ├──────────────────────────────────────────────────────┤
-│  Layer 2 — AI Agent Core (History / Memory / Skills) │
+│  Layer 2 — LLM Runtime (GGUF, Q4/Q8, SIMD inference)│
 ├──────────────────────────────────────────────────────┤
 │  Layer 1 — Micro-kernel (PMM, VMM, coroutines, VFS) │
 ├──────────────────────────────────────────────────────┤
@@ -28,16 +39,18 @@ the GOP framebuffer, and jumps to the kernel.
 with 4-level page tables, coroutine-based cooperative scheduler, NVMe/HID/GPU
 drivers, a simple VFS, and network stack.
 
-**Layer 2** — The AI Agent core. Each agent has a conversation history (ring
-buffer), a vector memory engine (HNSW index for semantic recall), and a skill
-engine that can generate, compile, and hot-load new C functions at runtime.
+**Layer 2** — LLM inference engine running quantized GGUF models. Used by
+the Agent layer for system-call–level LLM inference. Supports Q4_K_M and Q8
+quantization, AVX2 SIMD acceleration, and streaming token output.
 
-**Layer 3** — LLM inference engine running quantized GGUF models. Supports
-Q4_K_M and Q8 quantization, AVX2 SIMD acceleration, and streaming token output.
+**Layer 3** — The AI Agent core. Each agent has a conversation history (multiple
+sessions sorted by time, backed by SQLite3), a vector memory engine (HNSW index
+for semantic recall), and a skill engine that can generate, compile, and
+hot-load new C functions at runtime.
 
 **Layer 4** — Framebuffer-based UI with a dark theme. Sidebar file browser,
-AI chat panel with streaming output, built-in terminal, mouse cursor support,
-and status bar.
+AI chat panel with streaming output, built-in terminal, mouse cursor support
+(movement, left/right click), keyboard driver, and status bar.
 
 ## Directory Layout
 
@@ -52,11 +65,12 @@ src/
 │   ├── arch/           Multi-arch support (x86_64, aarch64, riscv64, loongarch64)
 │   ├── mm/             PMM, VMM, slab allocator
 │   ├── sched/          Coroutine scheduler, context switch
-│   ├── drivers/        NVMe, GPU framebuffer, HID, audio, serial, timer, PCI
+│   ├── drivers/        NVMe, GPU framebuffer, HID (keyboard+mouse), audio, serial, timer, PCI
 │   ├── fs/             VFS, AevOSFS
 │   └── net/            Network stack
 ├── agent/              AI Agent Core
 ├── llm/                LLM inference runtime
+├── db/                 Database layer (SQLite3-backed History / Memory / Skills)
 ├── ui/                 Framebuffer UI shell
 ├── lib/                Freestanding libc subset
 ├── tools/              Host utilities (mkfs_aevos, skill_packager)
@@ -65,6 +79,9 @@ src/
 │   ├── boot_info.h     Boot information structures
 │   └── config.h        Compile-time constants
 └── build/              Build artifacts
+
+third_party/
+└── sqlite3/            SQLite3 amalgamation (git submodule)
 ```
 
 ## Prerequisites
@@ -150,4 +167,4 @@ If the file is missing, sensible defaults are used.
 
 ## License
 
-This project is under active development. License TBD.
+LGPL-2.1 license.

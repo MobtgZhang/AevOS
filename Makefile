@@ -23,7 +23,7 @@ ifeq ($(ARCH),x86_64)
   CROSS_PREFIX2  := x86_64-linux-gnu-
   ARCH_SUBDIR    := x86_64
   KCFLAGS_ARCH   := -mno-red-zone -mcmodel=large -fno-pic -fno-pie
-  BOOT_CFLAGS_ARCH := -mno-red-zone -fshort-wchar
+  BOOT_CFLAGS_ARCH := -mno-red-zone -fshort-wchar -maccumulate-outgoing-args
   KERNEL_LDS     := $(SRCDIR)/kernel/arch/x86_64/kernel.lds
   BOOT_LDS       := $(SRCDIR)/boot/linker_boot.lds
   EFI_TARGET_FMT := efi-app-x86_64
@@ -31,6 +31,7 @@ ifeq ($(ARCH),x86_64)
   BOOT_ELF_FMT   := elf64-x86-64
   QEMU_CMD       := qemu-system-x86_64
   QEMU_EXTRA     :=
+  QEMU_RUN_DEVS  := -device usb-ehci -device usb-mouse -vga std
 
 else ifeq ($(ARCH),aarch64)
   CROSS_PREFIX   := aarch64-elf-
@@ -45,6 +46,7 @@ else ifeq ($(ARCH),aarch64)
   BOOT_ELF_FMT   := elf64-littleaarch64
   QEMU_CMD       := qemu-system-aarch64
   QEMU_EXTRA     := -M virt -cpu cortex-a72
+  QEMU_RUN_DEVS  := -device usb-ehci -device usb-mouse
 
 else ifeq ($(ARCH),riscv64)
   CROSS_PREFIX   := riscv64-elf-
@@ -59,16 +61,17 @@ else ifeq ($(ARCH),riscv64)
   BOOT_ELF_FMT   := elf64-littleriscv
   QEMU_CMD       := qemu-system-riscv64
   QEMU_EXTRA     := -M virt
+  QEMU_RUN_DEVS  := -device usb-ehci -device usb-mouse
 
 else ifeq ($(ARCH),loongarch64)
   CROSS_PREFIX   := loongarch64-unknown-linux-gnu-
   CROSS_PREFIX2  := loongarch64-linux-gnu-
   ARCH_SUBDIR    := loongarch64
-  KCFLAGS_ARCH   :=
-  BOOT_CFLAGS_ARCH :=
+  KCFLAGS_ARCH   := -mno-lsx -mno-lasx
+  BOOT_CFLAGS_ARCH := -mno-lsx -mno-lasx
   KERNEL_LDS     := $(SRCDIR)/kernel/arch/loongarch64/kernel.lds
   BOOT_LDS       := $(SRCDIR)/boot/linker_boot.lds
-  EFI_TARGET_FMT := binary
+  EFI_TARGET_FMT := pei-loongarch64
   EFI_BOOT_NAME  := BOOTLOONGARCH64.EFI
   BOOT_ELF_FMT   := elf64-loongarch
   QEMU_CMD       := qemu-system-loongarch64
@@ -77,6 +80,7 @@ else ifeq ($(ARCH),loongarch64)
                     -device nec-usb-xhci,id=xhci \
                     -device usb-tablet,bus=xhci.0,port=1 \
                     -device usb-kbd,bus=xhci.0,port=2
+  QEMU_RUN_DEVS  :=
 
 else
   $(error Unsupported ARCH=$(ARCH). Choose: x86_64, aarch64, riscv64, loongarch64)
@@ -90,6 +94,12 @@ OBJCOPY := $(CROSS_PREFIX)objcopy
 
 ifeq ($(shell which $(CC) 2>/dev/null),)
   CC      := $(CROSS_PREFIX2)gcc
+  AS      := $(CROSS_PREFIX2)as
+  LD      := $(CROSS_PREFIX2)ld
+  OBJCOPY := $(CROSS_PREFIX2)objcopy
+endif
+ifeq ($(shell which $(CC) 2>/dev/null),)
+  CC      := $(CROSS_PREFIX2)gcc-14
   AS      := $(CROSS_PREFIX2)as
   LD      := $(CROSS_PREFIX2)ld
   OBJCOPY := $(CROSS_PREFIX2)objcopy
@@ -123,15 +133,30 @@ GNUEFI_DIR   := /usr/lib
 GNUEFI_INC   := /usr/include/efi
 GNUEFI_CRT0  := $(GNUEFI_DIR)/crt0-efi-x86_64.o
 
+ifeq ($(ARCH),x86_64)
 BOOT_CFLAGS := -std=c17 -Wall -Wextra -O2 \
                -ffreestanding -fno-stack-protector \
                -fpic -fshort-wchar \
-               -I$(SRCDIR)/include -maccumulate-outgoing-args \
+               -I$(SRCDIR)/include \
                $(BOOT_CFLAGS_ARCH)
+else
+BOOT_CFLAGS := -std=c17 -Wall -Wextra -O2 \
+               -ffreestanding -fno-stack-protector \
+               -fno-pic -fno-pie -fshort-wchar \
+               -I$(SRCDIR)/include \
+               $(BOOT_CFLAGS_ARCH)
+endif
 
-BOOT_LDFLAGS := -nostdlib -znocombreloc -shared -Bsymbolic \
-                -T /usr/lib/elf_x86_64_efi.lds \
-                -L$(GNUEFI_DIR) -lgnuefi -lefi
+ifeq ($(ARCH),x86_64)
+  BOOT_GNUEFI_CRT0 := $(GNUEFI_DIR)/crt0-efi-x86_64.o
+  BOOT_LDFLAGS := -nostdlib -znocombreloc -shared -Bsymbolic \
+                  -T /usr/lib/elf_x86_64_efi.lds \
+                  -L$(GNUEFI_DIR) -lgnuefi -lefi
+else
+  BOOT_GNUEFI_CRT0 :=
+  BOOT_LDFLAGS := -nostdlib -znocombreloc -shared -Bsymbolic \
+                  -T $(BOOT_LDS)
+endif
 
 # ============================================================
 #  Directory structure
@@ -149,6 +174,7 @@ AGENT_DIR    := $(SRCDIR)/agent
 LLM_DIR      := $(SRCDIR)/llm
 UI_DIR       := $(SRCDIR)/ui
 LIB_DIR      := $(SRCDIR)/lib
+DB_DIR       := $(SRCDIR)/db
 TOOLS_DIR    := $(SRCDIR)/tools
 
 BUILD_DIR    := build/$(ARCH)
@@ -160,7 +186,17 @@ KERNEL_BUILD := $(BUILD_DIR)/kernel
 # ============================================================
 
 BOOT_CSRC := $(wildcard $(BOOT_DIR)/*.c)
-BOOT_OBJS := $(patsubst $(BOOT_DIR)/%.c, $(BOOT_BUILD)/%.o, $(BOOT_CSRC))
+BOOT_COBJS := $(patsubst $(BOOT_DIR)/%.c, $(BOOT_BUILD)/%.o, $(BOOT_CSRC))
+
+# Non-x86 arches need a reloc stub for PE/COFF (gnu-efi CRT provides this on x86_64)
+ifneq ($(ARCH),x86_64)
+  BOOT_RELOC_SRC := $(BOOT_DIR)/reloc_dummy.S
+  BOOT_RELOC_OBJ := $(BOOT_BUILD)/reloc_dummy.o
+else
+  BOOT_RELOC_OBJ :=
+endif
+
+BOOT_OBJS := $(BOOT_COBJS) $(BOOT_RELOC_OBJ)
 
 KERNEL_CSRC := $(wildcard $(KERNEL_DIR)/*.c) \
                $(wildcard $(KERNEL_ARCH)/*.c) \
@@ -172,7 +208,8 @@ KERNEL_CSRC := $(wildcard $(KERNEL_DIR)/*.c) \
                $(wildcard $(AGENT_DIR)/*.c) \
                $(wildcard $(LLM_DIR)/*.c) \
                $(wildcard $(UI_DIR)/*.c) \
-               $(wildcard $(LIB_DIR)/*.c)
+               $(wildcard $(LIB_DIR)/*.c) \
+               $(wildcard $(DB_DIR)/*.c)
 
 KERNEL_ASRC := $(wildcard $(KERNEL_ARCH)/*.S) \
                $(wildcard $(KERNEL_SCHED)/*.S)
@@ -228,6 +265,13 @@ else
   QEMU_FIRMWARE :=
 endif
 
+# LoongArch virt uses -bios (pflash requires blockdev syntax on this platform)
+ifeq ($(ARCH),loongarch64)
+  ifneq ($(OVMF_CODE),)
+    QEMU_FIRMWARE := -bios $(OVMF_CODE)
+  endif
+endif
+
 # ---- Host tools ----
 MKFS_AEVOS_SRC := $(TOOLS_DIR)/mkfs_aevos.c
 MKFS_AEVOS     := build/mkfs_aevos
@@ -272,6 +316,7 @@ dirs:
 	@mkdir -p $(BUILD_DIR)/$(LLM_DIR)
 	@mkdir -p $(BUILD_DIR)/$(UI_DIR)
 	@mkdir -p $(BUILD_DIR)/$(LIB_DIR)
+	@mkdir -p $(BUILD_DIR)/$(DB_DIR)
 	@mkdir -p $(BUILD_DIR)/$(TOOLS_DIR)
 
 # ============================================================
@@ -284,15 +329,27 @@ $(BOOT_BUILD)/%.o: $(BOOT_DIR)/%.c
 	@echo "  CC  [boot/$(ARCH)]  $<"
 	@$(CC) $(BOOT_CFLAGS) -c $< -o $@
 
+$(BOOT_BUILD)/reloc_dummy.o: $(BOOT_DIR)/reloc_dummy.S
+	@echo "  AS  [boot/$(ARCH)]  $<"
+	@$(CC) -c $< -o $@
+
 $(BOOT_SO): $(BOOT_OBJS)
 	@echo "  LD  [boot/$(ARCH)]  $@"
-	@$(LD) $(GNUEFI_CRT0) $(BOOT_OBJS) $(BOOT_LDFLAGS) -o $@
+	@$(LD) $(BOOT_GNUEFI_CRT0) $(BOOT_OBJS) $(BOOT_LDFLAGS) -o $@
 
 $(BOOT_EFI): $(BOOT_SO)
 	@echo "  EFI [boot/$(ARCH)]  $@"
+ifeq ($(ARCH),x86_64)
 	@$(OBJCOPY) -j .text -j .sdata -j .data -j .rodata \
 	            -j .dynamic -j .dynsym -j .rel -j .rela -j .reloc \
 	            --target=$(EFI_TARGET_FMT) -S $< $@
+else
+	@$(OBJCOPY) -j .text -j .sdata -j .data -j .rodata \
+	            -j .dynamic -j .dynsym -j .rel -j .rela -j .reloc \
+	            -j .got -j .got.plt \
+	            --target=$(EFI_TARGET_FMT) --subsystem=efi-app -S $< $@
+	@python3 $(SRCDIR)/tools/fix_pe_reloc.py $@
+endif
 
 # ============================================================
 #  Kernel
@@ -363,9 +420,7 @@ run: image
 	    -m 4G \
 	    -serial stdio \
 	    -net none \
-	    -device usb-ehci \
-	    -device usb-mouse \
-	    -vga std
+	    $(QEMU_RUN_DEVS)
 
 # ============================================================
 #  Clean

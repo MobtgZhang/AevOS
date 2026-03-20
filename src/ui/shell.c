@@ -191,6 +191,33 @@ void shell_render(ui_shell_t *shell)
     shell->needs_redraw = false;
 }
 
+static bool shell_is_mouse_event(input_event_type_t type)
+{
+    return type == INPUT_MOUSE_MOVE
+        || type == INPUT_MOUSE_BUTTON
+        || type == INPUT_MOUSE_BTN_DOWN
+        || type == INPUT_MOUSE_BTN_UP
+        || type == INPUT_MOUSE_SCROLL;
+}
+
+static void shell_handle_right_click(ui_shell_t *shell, input_event_t *ev)
+{
+    char msg[128];
+    snprintf(msg, sizeof(msg),
+             "[context-menu] Right-click at (%d, %d) — panel: %s",
+             ev->mouse_x, ev->mouse_y,
+             shell->hover_panel == PANEL_CHAT ? "chat" : "terminal");
+    terminal_print(&shell->terminal, msg);
+
+    if (shell->hover_panel == PANEL_CHAT) {
+        terminal_print(&shell->terminal,
+                       "  Actions: [Copy] [Paste] [Clear Chat] [New Session]");
+    } else {
+        terminal_print(&shell->terminal,
+                       "  Actions: [Copy] [Paste] [Clear Terminal]");
+    }
+}
+
 void shell_handle_input(ui_shell_t *shell, input_event_t *ev)
 {
     if (!shell || !ev)
@@ -198,8 +225,8 @@ void shell_handle_input(ui_shell_t *shell, input_event_t *ev)
 
     shell->needs_redraw = true;
 
-    /* Track mouse position for all event types */
-    if (ev->type == INPUT_MOUSE_MOVE || ev->type == INPUT_MOUSE_BUTTON) {
+    /* Track mouse position for all mouse event types */
+    if (shell_is_mouse_event(ev->type)) {
         shell->mouse_x = ev->mouse_x;
         shell->mouse_y = ev->mouse_y;
         shell->mouse_buttons = ev->mouse_buttons;
@@ -215,7 +242,28 @@ void shell_handle_input(ui_shell_t *shell, input_event_t *ev)
         shell->hover_panel = detect_hover_panel(shell);
     }
 
-    /* Mouse click switches active panel */
+    /* Left-click down: switch active panel and forward to widgets */
+    if (ev->type == INPUT_MOUSE_BTN_DOWN &&
+        (ev->button_changed & MOUSE_BTN_LEFT)) {
+        shell->active_panel = shell->hover_panel;
+
+        if (shell->show_sidebar &&
+            rect_contains(&shell->sidebar.bounds,
+                          ev->mouse_x, ev->mouse_y)) {
+            sidebar_handle_input(&shell->sidebar, ev);
+            sidebar_populate(&shell->sidebar, shell->agent);
+            return;
+        }
+    }
+
+    /* Right-click down: context menu */
+    if (ev->type == INPUT_MOUSE_BTN_DOWN &&
+        (ev->button_changed & MOUSE_BTN_RIGHT)) {
+        shell_handle_right_click(shell, ev);
+        return;
+    }
+
+    /* Legacy compatibility: also handle INPUT_MOUSE_BUTTON */
     if (ev->type == INPUT_MOUSE_BUTTON && (ev->mouse_buttons & MOUSE_BTN_LEFT)) {
         shell->active_panel = shell->hover_panel;
 
@@ -264,9 +312,8 @@ void shell_handle_input(ui_shell_t *shell, input_event_t *ev)
         }
     }
 
-    /* Forward mouse scroll to sidebar */
-    if (shell->show_sidebar &&
-        (ev->type == INPUT_MOUSE_MOVE || ev->type == INPUT_MOUSE_BUTTON)) {
+    /* Forward mouse events to sidebar when hovering */
+    if (shell->show_sidebar && shell_is_mouse_event(ev->type)) {
         if (rect_contains(&shell->sidebar.bounds,
                           ev->mouse_x, ev->mouse_y)) {
             sidebar_handle_input(&shell->sidebar, ev);
@@ -322,6 +369,12 @@ void shell_main_loop(ui_shell_t *shell)
     klog("Starting UI main loop\n");
 
     shell->needs_redraw = true;
+    uint64_t last_render_tick = 0;
+    uint64_t last_agent_tick  = 0;
+
+    /* Target ~30 fps: one frame every TIMER_FREQ_HZ/30 ticks */
+    const uint64_t frame_interval = TIMER_FREQ_HZ / 30;
+    const uint64_t agent_interval = TIMER_FREQ_HZ * 5;
 
     for (;;) {
         input_event_t ev;
@@ -331,17 +384,20 @@ void shell_main_loop(ui_shell_t *shell)
 
         shell->uptime_ticks++;
 
-        if (shell->uptime_ticks % (TIMER_FREQ_HZ * 5) == 0) {
+        if (shell->uptime_ticks - last_agent_tick >= agent_interval) {
+            last_agent_tick = shell->uptime_ticks;
             if (shell->agent)
                 agent_tick(shell->agent);
         }
 
-        if (shell->uptime_ticks % (TIMER_FREQ_HZ / 30) == 0) {
+        if (shell->uptime_ticks - last_render_tick >= frame_interval) {
             shell->terminal.blink_counter++;
             shell->needs_redraw = true;
         }
 
-        if (shell->needs_redraw) {
+        if (shell->needs_redraw &&
+            shell->uptime_ticks - last_render_tick >= frame_interval) {
+            last_render_tick = shell->uptime_ticks;
             shell_render(shell);
         }
 

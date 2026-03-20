@@ -1,9 +1,19 @@
 /*
  * x86-64 CPU initialization: GDT, IDT, and 8259 PIC.
+ *
+ * IRQ routing (after PIC remap):
+ *   vector 0x20  IRQ0   PIT timer        → irq0_stub  → timer_handler()
+ *   vector 0x21  IRQ1   PS/2 keyboard    → irq1_stub  → keyboard_handler()
+ *   vector 0x2C  IRQ12  PS/2 mouse       → irq12_stub → mouse_handler()
  */
 #include <aevos/types.h>
 #include "../io.h"
 #include "../arch.h"
+
+/* ISR stubs defined in isr_stubs.S */
+extern void irq0_stub(void);
+extern void irq1_stub(void);
+extern void irq12_stub(void);
 
 void arch_early_init(void)  { /* GDT+IDT+PIC done individually from main */ }
 void arch_enable_irq(void)  { sti(); }
@@ -91,8 +101,6 @@ struct idt_ptr {
 static struct idt_entry idt[IDT_ENTRIES];
 static struct idt_ptr   idtr;
 
-extern void timer_handler(void);
-
 static void default_isr(void)
 {
     __asm__ volatile("iretq");
@@ -117,6 +125,11 @@ void idt_init(void)
     for (int i = 0; i < IDT_ENTRIES; i++)
         idt_set_entry(i, default_handler, 0x08, 0x8E);
 
+    /* Wire IRQ stubs to their remapped vectors */
+    idt_set_entry(0x20, (uint64_t)irq0_stub,  0x08, 0x8E);  /* IRQ0:  timer    */
+    idt_set_entry(0x21, (uint64_t)irq1_stub,  0x08, 0x8E);  /* IRQ1:  keyboard */
+    idt_set_entry(0x2C, (uint64_t)irq12_stub, 0x08, 0x8E);  /* IRQ12: mouse    */
+
     idtr.limit = sizeof(idt) - 1;
     idtr.base  = (uint64_t)&idt;
 
@@ -134,14 +147,20 @@ void pic_init(void)
 {
     outb(PIC1_CMD,  0x11);  io_wait();
     outb(PIC2_CMD,  0x11);  io_wait();
-    outb(PIC1_DATA, 0x20);  io_wait();
-    outb(PIC2_DATA, 0x28);  io_wait();
-    outb(PIC1_DATA, 0x04);  io_wait();
-    outb(PIC2_DATA, 0x02);  io_wait();
-    outb(PIC1_DATA, 0x01);  io_wait();
+    outb(PIC1_DATA, 0x20);  io_wait();   /* IRQ 0-7  → vectors 0x20-0x27 */
+    outb(PIC2_DATA, 0x28);  io_wait();   /* IRQ 8-15 → vectors 0x28-0x2F */
+    outb(PIC1_DATA, 0x04);  io_wait();   /* slave on IRQ2 */
+    outb(PIC2_DATA, 0x02);  io_wait();   /* cascade identity */
+    outb(PIC1_DATA, 0x01);  io_wait();   /* 8086 mode */
     outb(PIC2_DATA, 0x01);  io_wait();
 
-    /* Mask all except IRQ0 (timer) and IRQ1 (keyboard) */
-    outb(PIC1_DATA, 0xFC);
-    outb(PIC2_DATA, 0xFF);
+    /*
+     * Unmask: IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade to slave)
+     * Master mask: ~(bit0 | bit1 | bit2) = 0xF8
+     *
+     * Unmask: IRQ12 (mouse) = slave bit 4
+     * Slave mask:  ~(bit4) = 0xEF
+     */
+    outb(PIC1_DATA, 0xF8);
+    outb(PIC2_DATA, 0xEF);
 }

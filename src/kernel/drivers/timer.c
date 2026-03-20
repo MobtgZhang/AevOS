@@ -3,25 +3,19 @@
 #include "../klog.h"
 #include <aevos/config.h>
 
-/*
- * Intel 8253/8254 PIT (Programmable Interval Timer)
- *
- * Channel 0: system timer (IRQ0)
- * Channel 1: historically DRAM refresh (unused)
- * Channel 2: PC speaker
- */
+static volatile uint64_t tick_count     = 0;
+static uint32_t          configured_freq = 0;
+static uint64_t          last_check_tick = 0;
+
+#if defined(__x86_64__)
+
+/* ── Intel 8253/8254 PIT (Programmable Interval Timer) ── */
 
 #define PIT_CHANNEL0_DATA  0x40
 #define PIT_CHANNEL2_DATA  0x42
 #define PIT_COMMAND        0x43
-
-/* Command byte: channel 0, lo/hi, rate generator */
 #define PIT_CMD_CH0_RATE   0x34
 #define PIT_BASE_FREQ      1193182UL
-
-static volatile uint64_t tick_count  = 0;
-static uint32_t          configured_freq = 0;
-static uint64_t          last_check_tick = 0;
 
 void timer_init(uint32_t freq_hz)
 {
@@ -43,8 +37,78 @@ void timer_init(uint32_t freq_hz)
     klog("[timer] PIT channel 0 configured at %u Hz (divisor=%u)\n", freq_hz, divisor);
 }
 
+#elif defined(__loongarch64)
+
+/*
+ * LoongArch Stable Timer (CSR.TCFG / CSR.TVAL / CSR.TICLR)
+ *
+ * CSR 0x41 (TCFG): Timer Config  — [bit 0]=En, [bit 1]=Periodic, [bits 2+]=InitVal
+ * CSR 0x42 (TVAL): Timer Value   — countdown
+ * CSR 0x44 (TICLR): Timer Clear  — write bit 0 to clear pending interrupt
+ *
+ * The stable counter frequency is read from CSR 0x25 (CPUCFG word 4, or CC_FREQ).
+ * For QEMU, the stable counter runs at 100MHz typically.
+ */
+
+#define CSR_TCFG   0x41
+#define CSR_TVAL   0x42
+#define CSR_TICLR  0x44
+#define CSR_CRMD   0x00
+#define CSR_ECFG   0x04
+
+#define LOONGARCH_TIMER_FREQ  100000000UL  /* 100 MHz (QEMU default) */
+
+void timer_init(uint32_t freq_hz)
+{
+    if (freq_hz == 0) freq_hz = TIMER_FREQ_HZ;
+    configured_freq = freq_hz;
+
+    uint64_t period = LOONGARCH_TIMER_FREQ / freq_hz;
+
+    /*
+     * TCFG: [bit 0] = Enable, [bit 1] = Periodic, [bits 2..] = InitVal
+     * InitVal is shifted left by 2 in the register.
+     */
+    uint64_t tcfg = (period << 2) | 0x3;  /* enable + periodic */
+    __asm__ volatile("csrwr %0, %1" : "+r"(tcfg) : "i"(CSR_TCFG));
+
+    /* Clear any pending timer interrupt */
+    uint64_t clear = 1;
+    __asm__ volatile("csrwr %0, %1" : "+r"(clear) : "i"(CSR_TICLR));
+
+    /* Enable timer interrupt in ECFG (bit 11 = TI) */
+    uint64_t ecfg;
+    __asm__ volatile("csrrd %0, %1" : "=r"(ecfg) : "i"(CSR_ECFG));
+    ecfg |= (1UL << 11);
+    __asm__ volatile("csrwr %0, %1" : "+r"(ecfg) : "i"(CSR_ECFG));
+
+    tick_count = 0;
+    last_check_tick = 0;
+    klog("[timer] LoongArch stable timer at %u Hz (period=%llu)\n", freq_hz, period);
+}
+
+#else /* aarch64, riscv64 — stub */
+
+void timer_init(uint32_t freq_hz)
+{
+    if (freq_hz == 0) freq_hz = TIMER_FREQ_HZ;
+    configured_freq = freq_hz;
+    tick_count = 0;
+    last_check_tick = 0;
+    klog("[timer] stub timer at %u Hz\n", freq_hz);
+}
+
+#endif
+
+/* ── Common API ─────────────────────────────────────── */
+
 void timer_handler(void)
 {
+#if defined(__loongarch64)
+    /* Clear timer interrupt */
+    uint64_t clear = 1;
+    __asm__ volatile("csrwr %0, 0x44" : "+r"(clear));
+#endif
     tick_count++;
 }
 

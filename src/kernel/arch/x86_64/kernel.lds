@@ -9,6 +9,13 @@ ENTRY(kernel_main)
 KERNEL_VBASE = 0xFFFF800000000000;
 KERNEL_PBASE = 0x100000;
 
+PHDRS
+{
+    text PT_LOAD FLAGS(5);   /* PF_R | PF_X */
+    ro   PT_LOAD FLAGS(4);   /* PF_R */
+    data PT_LOAD FLAGS(6);   /* PF_R | PF_W */
+}
+
 SECTIONS
 {
     . = KERNEL_VBASE + KERNEL_PBASE;
@@ -22,7 +29,7 @@ SECTIONS
         *(.text.*)
         . = ALIGN(4096);
         _text_end = .;
-    }
+    } :text
 
     .rodata ALIGN(4096) : AT(ADDR(.rodata) - KERNEL_VBASE)
     {
@@ -31,7 +38,7 @@ SECTIONS
         *(.rodata.*)
         . = ALIGN(4096);
         _rodata_end = .;
-    }
+    } :ro
 
     .data ALIGN(4096) : AT(ADDR(.data) - KERNEL_VBASE)
     {
@@ -40,7 +47,7 @@ SECTIONS
         *(.data.*)
         . = ALIGN(4096);
         _data_end = .;
-    }
+    } :data
 
     .bss ALIGN(4096) : AT(ADDR(.bss) - KERNEL_VBASE)
     {
@@ -50,7 +57,7 @@ SECTIONS
         *(COMMON)
         . = ALIGN(4096);
         _bss_end = .;
-    }
+    } :data
 
     _kernel_end = .;
 

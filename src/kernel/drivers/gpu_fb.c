@@ -1,6 +1,9 @@
 #include "gpu_fb.h"
+#include "virtio_gpu.h"
 #include "../klog.h"
 #include "../mm/slab.h"
+#include "../mm/pmm.h"
+#include <aevos/config.h>
 
 /* ── global framebuffer context ── */
 
@@ -143,8 +146,18 @@ void fb_init(framebuffer_t *boot_fb)
     fb.bpp       = boot_fb->bpp;
     fb.phys_base = (uint64_t)(uintptr_t)boot_fb->base;
 
+    /*
+     * Allocate back buffer via page allocator — the slab max is 64 KB
+     * but a typical framebuffer is several MB.
+     */
     size_t buf_size = (size_t)fb.height * fb.pitch;
-    fb.back_buffer = (uint32_t *)kmalloc(buf_size);
+    size_t buf_pages = (buf_size + PAGE_SIZE - 1) / PAGE_SIZE;
+    uint64_t bb_phys = pmm_alloc_pages(buf_pages);
+    if (bb_phys) {
+        fb.back_buffer = (uint32_t *)(bb_phys + PHYS_MAP_BASE);
+    } else {
+        fb.back_buffer = NULL;
+    }
     fb.double_buffered = (fb.back_buffer != NULL);
 
     fb_clear(0x00000000);
@@ -413,4 +426,9 @@ void fb_swap_buffers(void)
     if (!fb.back_buffer || !fb.pixels) return;
     size_t buf_size = (size_t)fb.height * fb.pitch;
     fb_memcpy(fb.pixels, fb.back_buffer, buf_size);
+
+    /* Notify virtio-gpu to refresh the display (required on LoongArch etc.) */
+    if (virtio_gpu_available()) {
+        virtio_gpu_flush(0, 0, fb.width, fb.height);
+    }
 }

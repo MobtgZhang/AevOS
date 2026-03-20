@@ -15,6 +15,7 @@
 #include "drivers/pci.h"
 #include "drivers/nvme.h"
 #include "drivers/audio.h"
+#include "drivers/virtio_gpu.h"
 #include "fs/vfs.h"
 #include "sched/coroutine.h"
 #include "../llm/llm_runtime.h"
@@ -119,6 +120,19 @@ void NORETURN kernel_main(boot_info_t *bi)
     klog("[fb] Initializing framebuffer: %ux%u @ %u bpp\n",
          fb_handoff.width, fb_handoff.height, fb_handoff.bpp);
     fb_init(&fb_handoff);
+
+    /* Initialize virtio-GPU driver for platforms without legacy VGA (LoongArch, etc.) */
+    klog("[gpu] probing virtio-gpu\n");
+    uint64_t fb_phys = (uint64_t)(uintptr_t)fb_handoff.base;
+#if !defined(__x86_64__)
+    /* On non-x86, the GOP framebuffer addr may need PHYS_MAP_BASE stripped */
+    if (fb_phys >= PHYS_MAP_BASE)
+        fb_phys -= PHYS_MAP_BASE;
+#endif
+    if (virtio_gpu_init(fb_phys, fb_handoff.width, fb_handoff.height) == 0)
+        klog("[gpu] virtio-gpu display active\n");
+    else
+        klog("[gpu] virtio-gpu not available (using direct framebuffer)\n");
 
     hid_set_mouse_bounds((int32_t)fb_handoff.width, (int32_t)fb_handoff.height);
 

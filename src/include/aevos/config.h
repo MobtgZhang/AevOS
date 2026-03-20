@@ -73,27 +73,40 @@
 
 #if defined(__x86_64__)
 #define SERIAL_PORT        0x3F8
+#define SERIAL_USE_PIO     1
 #define PCI_CONFIG_ADDR    0xCF8
 #define PCI_CONFIG_DATA    0xCFC
+#define PCI_USE_ECAM       0
 #elif defined(__aarch64__)
 #define SERIAL_PORT        0
 #define SERIAL_MMIO_BASE   0x09000000ULL
+#define SERIAL_USE_PIO     0
 #define PCI_CONFIG_ADDR    0
 #define PCI_CONFIG_DATA    0
+#define PCI_ECAM_BASE      0x3F000000ULL
+#define PCI_USE_ECAM       1
 #elif defined(__riscv)
 #define SERIAL_PORT        0
 #define SERIAL_MMIO_BASE   0x10000000ULL
+#define SERIAL_USE_PIO     0
 #define PCI_CONFIG_ADDR    0
 #define PCI_CONFIG_DATA    0
+#define PCI_ECAM_BASE      0x30000000ULL
+#define PCI_USE_ECAM       1
 #elif defined(__loongarch64)
 #define SERIAL_PORT        0
 #define SERIAL_MMIO_BASE   0x1FE001E0ULL
+#define SERIAL_USE_PIO     0
 #define PCI_CONFIG_ADDR    0
 #define PCI_CONFIG_DATA    0
+#define PCI_ECAM_BASE      0x20000000ULL
+#define PCI_USE_ECAM       1
 #else
 #define SERIAL_PORT        0
+#define SERIAL_USE_PIO     0
 #define PCI_CONFIG_ADDR    0
 #define PCI_CONFIG_DATA    0
+#define PCI_USE_ECAM       0
 #endif
 
 /* ── Allocator tunables ──────────────────────────────── */

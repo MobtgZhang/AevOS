@@ -8,6 +8,64 @@ static uint32_t     device_count = 0;
 
 /* ── config-space I/O ── */
 
+#if PCI_USE_ECAM
+
+/*
+ * ECAM (Enhanced Configuration Access Mechanism) for non-x86 platforms.
+ * PCI config space is memory-mapped at PCI_ECAM_BASE:
+ *   address = ECAM_BASE + (bus << 20) + (dev << 15) + (func << 12) + offset
+ */
+
+uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset)
+{
+    volatile uint32_t *addr = (volatile uint32_t *)(
+        PCI_ECAM_BASE +
+        ((uint64_t)bus  << 20) +
+        ((uint64_t)(dev & 0x1F)  << 15) +
+        ((uint64_t)(func & 0x07) << 12) +
+        (offset & 0xFC)
+    );
+    return *addr;
+}
+
+void pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset, uint32_t value)
+{
+    volatile uint32_t *addr = (volatile uint32_t *)(
+        PCI_ECAM_BASE +
+        ((uint64_t)bus  << 20) +
+        ((uint64_t)(dev & 0x1F)  << 15) +
+        ((uint64_t)(func & 0x07) << 12) +
+        (offset & 0xFC)
+    );
+    *addr = value;
+}
+
+uint8_t pci_read_config8(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset)
+{
+    volatile uint8_t *addr = (volatile uint8_t *)(
+        PCI_ECAM_BASE +
+        ((uint64_t)bus  << 20) +
+        ((uint64_t)(dev & 0x1F)  << 15) +
+        ((uint64_t)(func & 0x07) << 12) +
+        offset
+    );
+    return *addr;
+}
+
+uint16_t pci_read_config16(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset)
+{
+    volatile uint16_t *addr = (volatile uint16_t *)(
+        PCI_ECAM_BASE +
+        ((uint64_t)bus  << 20) +
+        ((uint64_t)(dev & 0x1F)  << 15) +
+        ((uint64_t)(func & 0x07) << 12) +
+        (offset & ~1u)
+    );
+    return *addr;
+}
+
+#else /* x86 port I/O */
+
 uint32_t pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset)
 {
     uint32_t addr = (1u << 31)
@@ -30,6 +88,20 @@ void pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset, ui
     outl(PCI_CONFIG_DATA, value);
 }
 
+uint8_t pci_read_config8(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset)
+{
+    uint32_t val = pci_read_config(bus, dev, func, (uint8_t)(offset & 0xFC));
+    return (uint8_t)(val >> ((offset & 3) * 8));
+}
+
+uint16_t pci_read_config16(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset)
+{
+    uint32_t val = pci_read_config(bus, dev, func, (uint8_t)(offset & 0xFC));
+    return (uint16_t)(val >> ((offset & 2) * 8));
+}
+
+#endif /* PCI_USE_ECAM */
+
 /* ── BAR decoding ── */
 
 static uint64_t decode_bar(uint8_t bus, uint8_t dev, uint8_t func, uint8_t bar_offset)
@@ -37,7 +109,6 @@ static uint64_t decode_bar(uint8_t bus, uint8_t dev, uint8_t func, uint8_t bar_o
     uint32_t bar_lo = pci_read_config(bus, dev, func, bar_offset);
 
     if (bar_lo & PCI_BAR_IO) {
-        /* I/O space BAR */
         return bar_lo & ~0x3u;
     }
 
@@ -84,7 +155,6 @@ static void probe_function(uint8_t bus, uint8_t dev, uint8_t func)
     for (int i = 0; i < 6; i++) {
         uint8_t bar_off = PCI_CFG_BAR0 + (uint8_t)(i * 4);
         d->bar[i] = decode_bar(bus, dev, func, bar_off);
-        /* Skip next BAR slot for 64-bit BARs */
         uint32_t bar_raw = pci_read_config(bus, dev, func, bar_off);
         if (!(bar_raw & PCI_BAR_IO) && (bar_raw & 0x06) == PCI_BAR_MEM_64) {
             i++;
@@ -105,7 +175,6 @@ static void probe_device(uint8_t bus, uint8_t dev)
 
     probe_function(bus, dev, 0);
 
-    /* Check if multifunction */
     uint32_t hdr = pci_read_config(bus, dev, 0, PCI_CFG_HEADER_TYPE);
     if ((hdr >> 16) & 0x80) {
         for (uint8_t func = 1; func < PCI_MAX_FUNC; func++)

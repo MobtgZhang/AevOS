@@ -50,6 +50,8 @@ typedef struct {
 void          pci_init(void);
 uint32_t      pci_read_config(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset);
 void          pci_write_config(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset, uint32_t value);
+uint8_t       pci_read_config8(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset);
+uint16_t      pci_read_config16(uint8_t bus, uint8_t dev, uint8_t func, uint16_t offset);
 pci_device_t *pci_find_device(uint16_t vendor_id, uint16_t device_id);
 pci_device_t *pci_find_class(uint8_t class_code, uint8_t subclass);
 uint64_t      pci_get_bar(pci_device_t *dev, uint8_t bar_index);

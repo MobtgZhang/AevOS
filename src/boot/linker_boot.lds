@@ -1,12 +1,18 @@
 /*
  * UEFI boot stub linker script.
  * Produces a shared object that objcopy converts to a PE/COFF EFI application.
- * Three aligned sections: .text (code), .data (all data), .reloc (PE fixups).
+ * Separate LOAD segments with correct permissions eliminate the RWX warning.
  */
+
+PHDRS
+{
+    text PT_LOAD FLAGS(5);   /* PF_R | PF_X */
+    data PT_LOAD FLAGS(6);   /* PF_R | PF_W */
+}
 
 SECTIONS
 {
-    . = 0;
+    . = 0x1000;
 
     .text : {
         _text = .;
@@ -14,7 +20,7 @@ SECTIONS
         *(.text.*)
         . = ALIGN(4096);
         _etext = .;
-    }
+    } :text
 
     .data : {
         _data = .;
@@ -22,25 +28,15 @@ SECTIONS
         *(.rodata.*)
         *(.data)
         *(.data.*)
-        *(.dynstr)
-        *(.dynamic)
-        *(.dynsym)
-        *(.hash)
-        *(.gnu.hash)
         *(.got)
         *(.got.plt)
-        *(.rel)
-        *(.rel.*)
-        *(.rela)
-        *(.rela.*)
         . = ALIGN(4096);
         _edata = .;
-    }
+    } :data
 
     .reloc : {
         *(.reloc)
-        . = ALIGN(4096);
-    }
+    } :data
 
     .bss : {
         _bss = .;
@@ -49,13 +45,22 @@ SECTIONS
         *(COMMON)
         . = ALIGN(4096);
         _ebss = .;
-    }
+    } :data
 
     /DISCARD/ : {
         *(.comment)
         *(.note.*)
         *(.eh_frame)
         *(.eh_frame_hdr)
+        *(.dynstr)
+        *(.dynamic)
+        *(.dynsym)
+        *(.hash)
+        *(.gnu.hash)
+        *(.rel)
+        *(.rel.*)
+        *(.rela)
+        *(.rela.*)
     }
 }
 

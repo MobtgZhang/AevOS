@@ -5,10 +5,13 @@
 /* ── input event types ── */
 
 typedef enum {
-    INPUT_KEY_PRESS    = 0,
-    INPUT_KEY_RELEASE  = 1,
-    INPUT_MOUSE_MOVE   = 2,
-    INPUT_MOUSE_BUTTON = 3,
+    INPUT_KEY_PRESS       = 0,
+    INPUT_KEY_RELEASE     = 1,
+    INPUT_MOUSE_MOVE      = 2,
+    INPUT_MOUSE_BUTTON    = 3,
+    INPUT_MOUSE_SCROLL    = 4,
+    INPUT_MOUSE_BTN_DOWN  = 5,
+    INPUT_MOUSE_BTN_UP    = 6,
 } input_event_type_t;
 
 /* ── modifier flags ── */
@@ -76,11 +79,8 @@ typedef struct input_event {
     int32_t            mouse_dy;
     uint8_t            mouse_buttons;
     uint16_t           modifiers;
+    uint8_t            button_changed;   /* which button triggered the event */
 } input_event_t;
-
-/* ── input event type for scroll ── */
-
-#define INPUT_MOUSE_SCROLL 4
 
 /* ── API ── */
 
@@ -91,3 +91,5 @@ void mouse_handler(void);
 bool input_poll(input_event_t *ev);
 bool input_wait(input_event_t *ev);
 void input_get_mouse_pos(int32_t *x, int32_t *y);
+uint8_t input_get_mouse_buttons(void);
+keycode_t input_scancode_to_keycode(uint8_t scancode, bool extended);

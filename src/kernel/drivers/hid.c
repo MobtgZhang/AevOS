@@ -181,15 +181,16 @@ void keyboard_handler(void)
     update_modifiers(kc, !released);
 
     input_event_t ev;
-    ev.type          = released ? INPUT_KEY_RELEASE : INPUT_KEY_PRESS;
-    ev.keycode       = kc;
-    ev.scancode      = sc;
-    ev.mouse_x       = mouse_x;
-    ev.mouse_y       = mouse_y;
-    ev.mouse_dx      = 0;
-    ev.mouse_dy      = 0;
-    ev.mouse_buttons = mouse_buttons;
-    ev.modifiers     = current_modifiers;
+    ev.type           = released ? INPUT_KEY_RELEASE : INPUT_KEY_PRESS;
+    ev.keycode        = kc;
+    ev.scancode       = sc;
+    ev.mouse_x        = mouse_x;
+    ev.mouse_y        = mouse_y;
+    ev.mouse_dx       = 0;
+    ev.mouse_dy       = 0;
+    ev.mouse_buttons  = mouse_buttons;
+    ev.modifiers      = current_modifiers;
+    ev.button_changed = 0;
     push_event(&ev);
 }
 
@@ -222,19 +223,65 @@ void mouse_handler(void)
         if (mouse_x >= mouse_max_x) mouse_x = mouse_max_x - 1;
         if (mouse_y >= mouse_max_y) mouse_y = mouse_max_y - 1;
 
-        mouse_buttons = (uint8_t)(mouse_bytes[0] & 0x07);
+        uint8_t new_buttons = (uint8_t)(mouse_bytes[0] & 0x07);
+        uint8_t old_buttons = mouse_buttons;
+        mouse_buttons = new_buttons;
 
-        input_event_t ev;
-        ev.type          = (dx || dy) ? INPUT_MOUSE_MOVE : INPUT_MOUSE_BUTTON;
-        ev.keycode       = KEY_NONE;
-        ev.scancode      = 0;
-        ev.mouse_x       = mouse_x;
-        ev.mouse_y       = mouse_y;
-        ev.mouse_dx      = dx;
-        ev.mouse_dy      = dy;
-        ev.mouse_buttons = mouse_buttons;
-        ev.modifiers     = current_modifiers;
-        push_event(&ev);
+        /* Generate movement event */
+        if (dx || dy) {
+            input_event_t ev;
+            ev.type           = INPUT_MOUSE_MOVE;
+            ev.keycode        = KEY_NONE;
+            ev.scancode       = 0;
+            ev.mouse_x        = mouse_x;
+            ev.mouse_y        = mouse_y;
+            ev.mouse_dx       = dx;
+            ev.mouse_dy       = dy;
+            ev.mouse_buttons  = new_buttons;
+            ev.modifiers      = current_modifiers;
+            ev.button_changed = 0;
+            push_event(&ev);
+        }
+
+        /* Generate per-button press/release events */
+        uint8_t changed = old_buttons ^ new_buttons;
+        if (changed) {
+            for (uint8_t bit = 0; bit < 3; bit++) {
+                uint8_t mask = (uint8_t)(1u << bit);
+                if (!(changed & mask)) continue;
+
+                input_event_t ev;
+                ev.type           = (new_buttons & mask)
+                                    ? INPUT_MOUSE_BTN_DOWN
+                                    : INPUT_MOUSE_BTN_UP;
+                ev.keycode        = KEY_NONE;
+                ev.scancode       = 0;
+                ev.mouse_x        = mouse_x;
+                ev.mouse_y        = mouse_y;
+                ev.mouse_dx       = 0;
+                ev.mouse_dy       = 0;
+                ev.mouse_buttons  = new_buttons;
+                ev.modifiers      = current_modifiers;
+                ev.button_changed = mask;
+                push_event(&ev);
+            }
+        }
+
+        /* Legacy combined event for backward compatibility */
+        if (!dx && !dy && !changed) {
+            input_event_t ev;
+            ev.type           = INPUT_MOUSE_BUTTON;
+            ev.keycode        = KEY_NONE;
+            ev.scancode       = 0;
+            ev.mouse_x        = mouse_x;
+            ev.mouse_y        = mouse_y;
+            ev.mouse_dx       = 0;
+            ev.mouse_dy       = 0;
+            ev.mouse_buttons  = new_buttons;
+            ev.modifiers      = current_modifiers;
+            ev.button_changed = 0;
+            push_event(&ev);
+        }
         break;
     }
     }
@@ -325,4 +372,16 @@ void input_get_mouse_pos(int32_t *x, int32_t *y)
 {
     if (x) *x = mouse_x;
     if (y) *y = mouse_y;
+}
+
+uint8_t input_get_mouse_buttons(void)
+{
+    return mouse_buttons;
+}
+
+keycode_t input_scancode_to_keycode(uint8_t scancode, bool extended)
+{
+    uint8_t make = scancode & 0x7F;
+    if (make >= 128) return KEY_NONE;
+    return extended ? extended_table[make] : scancode_table[make];
 }

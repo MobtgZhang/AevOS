@@ -585,6 +585,32 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     __asm__ volatile("mov %0, %%cr3" : : "r"(pt_base) : "memory");
 #endif
 
+#if defined(__loongarch64) || defined(__loongarch__)
+    {
+        /*
+         * LoongArch DMW (Direct Mapping Window) setup.
+         * After ExitBootServices we are in DA (Direct Address) mode.
+         * The kernel entry point is a DMW virtual address (0x9000...).
+         * We configure DMW then switch to Mapped (PG) mode so the
+         * kernel address is reachable.
+         *
+         * DMW0: VSEG=0x0 identity map, uncached, PLV0
+         *       — covers current bootloader code so mode-switch is safe
+         * DMW1: VSEG=0x9 cached, PLV0
+         *       — covers kernel virtual addresses
+         */
+        UINT64 tmp;
+        tmp = 0x0000000000000001ULL;
+        __asm__ volatile("csrwr %0, 0x180" : "+r"(tmp));
+        tmp = 0x9000000000000011ULL;
+        __asm__ volatile("csrwr %0, 0x181" : "+r"(tmp));
+
+        __asm__ volatile("csrrd %0, 0x0" : "=r"(tmp));
+        tmp = (tmp & ~(1ULL << 3)) | (1ULL << 4);
+        __asm__ volatile("csrwr %0, 0x0" : "+r"(tmp) :: "memory");
+    }
+#endif
+
     /* Jump to kernel entry (now accessible through higher-half mapping) */
     typedef void (*kernel_entry_t)(boot_info_t *);
     kernel_entry_t entry = (kernel_entry_t)(UINTN)entry_point;

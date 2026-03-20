@@ -59,6 +59,8 @@ static inline void arch_spin_hint_inline(void) {
     __asm__ volatile("nop");
 #elif defined(__loongarch64)
     __asm__ volatile("nop");
+#elif defined(__mips64)
+    __asm__ volatile("nop");
 #endif
 }
 

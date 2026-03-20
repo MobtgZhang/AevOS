@@ -377,6 +377,8 @@ void shell_main_loop(ui_shell_t *shell)
     const uint64_t agent_interval = TIMER_FREQ_HZ * 5;
 
     for (;;) {
+        hid_poll_serial();
+
         input_event_t ev;
         while (input_poll(&ev)) {
             shell_handle_input(shell, &ev);

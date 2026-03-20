@@ -1,30 +1,57 @@
 #!/usr/bin/env python3
 """
-Fix the PE Base Relocation Data Directory size to match the .reloc
-section's VirtualSize, preventing EDK2 from reading zero-padded
-relocation blocks (SizeOfBlock==0 triggers RETURN_LOAD_ERROR).
+Minimal PE/COFF fixup for non-x86 EFI binaries.
+
+Works around objcopy quirks when generating EFI applications
+for aarch64 / riscv64 / loongarch64.
 """
-import struct, sys
+import struct
+import sys
+import os
 
-path = sys.argv[1]
-with open(path, "r+b") as f:
-    data = f.read()
-    pe = data.find(b"PE\x00\x00")
-    if pe < 0:
-        sys.exit("Not a PE file")
+PE_SUBSYSTEM_EFI_APP = 10
 
-    num_sect = struct.unpack_from("<H", data, pe + 6)[0]
-    opt_hdr_size = struct.unpack_from("<H", data, pe + 20)[0]
-    sect_start = pe + 24 + opt_hdr_size
 
-    # Data Directory entry 5 (Base Relocation) offset
-    dd5_off = pe + 24 + 112 + 5 * 8  # optional_header + 112 + entry_index * 8
+def fix_pe(path):
+    with open(path, 'r+b') as f:
+        data = bytearray(f.read())
 
-    for i in range(num_sect):
-        s = sect_start + i * 40
-        name = data[s:s+8].rstrip(b"\x00")
-        if name == b".reloc":
-            vsize = struct.unpack_from("<I", data, s + 8)[0]
-            f.seek(dd5_off + 4)
-            f.write(struct.pack("<I", vsize))
-            break
+    if len(data) < 0x40:
+        return
+
+    pe_off = struct.unpack_from('<I', data, 0x3C)[0]
+    if pe_off + 4 > len(data):
+        return
+    if data[pe_off:pe_off + 4] != b'PE\x00\x00':
+        return
+
+    coff_off = pe_off + 4
+    opt_off = coff_off + 20
+
+    if opt_off + 70 > len(data):
+        return
+
+    magic = struct.unpack_from('<H', data, opt_off)[0]
+    if magic != 0x20B:  # PE32+
+        return
+
+    # Ensure Subsystem = EFI Application
+    struct.pack_into('<H', data, opt_off + 68, PE_SUBSYSTEM_EFI_APP)
+
+    # Align SizeOfHeaders to FileAlignment
+    file_align = struct.unpack_from('<I', data, opt_off + 36)[0]
+    if file_align == 0:
+        file_align = 512
+    size_of_headers = struct.unpack_from('<I', data, opt_off + 60)[0]
+    aligned_hdr = (size_of_headers + file_align - 1) & ~(file_align - 1)
+    if aligned_hdr != size_of_headers:
+        struct.pack_into('<I', data, opt_off + 60, aligned_hdr)
+
+    with open(path, 'wb') as f:
+        f.write(data)
+
+
+if __name__ == '__main__':
+    for path in sys.argv[1:]:
+        if os.path.isfile(path):
+            fix_pe(path)

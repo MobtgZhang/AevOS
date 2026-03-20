@@ -3,6 +3,7 @@
 #include "font.h"
 #include "../kernel/drivers/gpu_fb.h"
 #include "../kernel/drivers/hid.h"
+#include "../kernel/locale.h"
 #include "../kernel/klog.h"
 #include "../agent/agent_core.h"
 #include "../lib/string.h"
@@ -559,14 +560,17 @@ bool terminal_handle_input(terminal_t *term, input_event_t *ev)
         return true;
     }
 
-    if (ev->keycode >= 32 && ev->keycode < 127 &&
-        term->input_len < TERM_INPUT_LEN - 1) {
-        for (int i = term->input_len; i >= term->cursor_pos; i--)
-            term->input_buf[i + 1] = term->input_buf[i];
-        term->input_buf[term->cursor_pos] = (char)ev->keycode;
-        term->cursor_pos++;
-        term->input_len++;
-        return true;
+    {
+        char ch = keycode_to_char(ev->keycode, ev->modifiers);
+        if (ch >= 32 && ch < 127 &&
+            term->input_len < TERM_INPUT_LEN - 1) {
+            for (int i = term->input_len; i >= term->cursor_pos; i--)
+                term->input_buf[i + 1] = term->input_buf[i];
+            term->input_buf[term->cursor_pos] = ch;
+            term->cursor_pos++;
+            term->input_len++;
+            return true;
+        }
     }
 
     return false;

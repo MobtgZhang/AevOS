@@ -3,6 +3,7 @@
 #include "font.h"
 #include "../kernel/drivers/gpu_fb.h"
 #include "../kernel/drivers/hid.h"
+#include "../kernel/locale.h"
 #include "../kernel/klog.h"
 #include "../lib/string.h"
 
@@ -324,13 +325,15 @@ bool chat_view_handle_input(chat_view_t *cv, input_event_t *ev)
         return true;
     }
 
-    if (ev->keycode >= 32 && ev->keycode < 127 &&
-        len < CHAT_INPUT_SIZE - 1) {
-        for (int i = len; i >= cv->input_cursor; i--)
-            cv->input_text[i + 1] = cv->input_text[i];
-        cv->input_text[cv->input_cursor] = (char)ev->keycode;
-        cv->input_cursor++;
-        return true;
+    {
+        char ch = keycode_to_char(ev->keycode, ev->modifiers);
+        if (ch >= 32 && ch < 127 && len < CHAT_INPUT_SIZE - 1) {
+            for (int i = len; i >= cv->input_cursor; i--)
+                cv->input_text[i + 1] = cv->input_text[i];
+            cv->input_text[cv->input_cursor] = ch;
+            cv->input_cursor++;
+            return true;
+        }
     }
 
     return false;

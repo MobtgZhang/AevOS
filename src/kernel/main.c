@@ -16,6 +16,7 @@
 #include "drivers/nvme.h"
 #include "drivers/audio.h"
 #include "drivers/virtio_gpu.h"
+#include "locale.h"
 #include "fs/vfs.h"
 #include "sched/coroutine.h"
 #include "../llm/llm_runtime.h"
@@ -61,6 +62,15 @@ static void shell_coroutine(void *arg)
 
 void NORETURN kernel_main(boot_info_t *bi)
 {
+#if defined(__mips64)
+    /*
+     * Direct-boot path: boot_shim returns a kseg0 pointer (already valid).
+     * UEFI path (if ever used): convert low physical address to kseg0.
+     */
+    if ((uintptr_t)bi < PHYS_MAP_BASE)
+        bi = (boot_info_t *)((uintptr_t)bi + PHYS_MAP_BASE);
+#endif
+
     if (bi->magic != BOOT_MAGIC) { /* 0xAE05B007 */
         for (;;) arch_panic_stop();
     }
@@ -87,6 +97,16 @@ void NORETURN kernel_main(boot_info_t *bi)
     klog("[mm] VMM init (identity map + high half + framebuffer)\n");
     vmm_init(bi);
 
+#if defined(__aarch64__)
+    /*
+     * TTBR0 (bootloader identity map) pages live in EfiLoaderData which the
+     * PMM now considers free.  Switch the boot_info pointer to the
+     * PHYS_MAP_BASE mapping (TTBR1) so we no longer depend on TTBR0.
+     */
+    bi = (boot_info_t *)((uintptr_t)bi + PHYS_MAP_BASE);
+#endif
+    /* mips64: bi was already converted to xkphys at kernel_main entry */
+
     klog("[mm] slab allocator init\n");
     slab_init();
 
@@ -94,6 +114,9 @@ void NORETURN kernel_main(boot_info_t *bi)
 
     klog("[tmr] timer %u Hz\n", TIMER_FREQ_HZ);
     timer_init(TIMER_FREQ_HZ);
+
+    klog("[locale] keyboard layout init\n");
+    locale_init();
 
     klog("[hid] keyboard + mouse\n");
     hid_init();
@@ -117,22 +140,86 @@ void NORETURN kernel_main(boot_info_t *bi)
 
     framebuffer_t fb_handoff;
     memcpy(&fb_handoff, &bi->fb, sizeof(framebuffer_t));
-    klog("[fb] Initializing framebuffer: %ux%u @ %u bpp\n",
-         fb_handoff.width, fb_handoff.height, fb_handoff.bpp);
+
+    /* Save the raw physical base before remapping for virtio-gpu backing */
+    uint64_t fb_phys_base = (uint64_t)(uintptr_t)fb_handoff.base;
+
+#if defined(__aarch64__) || defined(__mips64)
+    /*
+     * On aarch64/mips64, the GOP FrameBufferBase is a raw physical
+     * address.  Remap it through PHYS_MAP_BASE so access goes via
+     * the kernel's direct physical mapping segment.
+     */
+    if (fb_handoff.base)
+        fb_handoff.base = (uint32_t *)(uintptr_t)(PHYS_MAP_BASE + fb_phys_base);
+#endif
+
+    klog("[fb] Initializing framebuffer: %ux%u @ %u bpp base=%p (phys=%llx)\n",
+         fb_handoff.width, fb_handoff.height, fb_handoff.bpp,
+         (void *)fb_handoff.base, (unsigned long long)fb_phys_base);
+
+    /*
+     * If GOP failed (dimensions are zero), try to bring up virtio-gpu
+     * with default dimensions anyway — common on aarch64 virt where
+     * some firmware builds lack a virtio-gpu GOP driver.
+     */
+    uint32_t gpu_width  = fb_handoff.width  ? fb_handoff.width  : 1024;
+    uint32_t gpu_height = fb_handoff.height ? fb_handoff.height : 768;
+
     fb_init(&fb_handoff);
 
-    /* Initialize virtio-GPU driver for platforms without legacy VGA (LoongArch, etc.) */
+    /*
+     * Initialize virtio-GPU driver.
+     *
+     * On virtio-gpu platforms the GOP FrameBufferBase points to device
+     * BAR memory which cannot be used as a DMA backing store.  Instead
+     * we use the kernel-allocated back buffer (guest RAM) as the
+     * virtio-gpu resource backing.  Pipeline:
+     *   draw → back_buffer → virtio transfer+flush → display.
+     */
     klog("[gpu] probing virtio-gpu\n");
-    uint64_t fb_phys = (uint64_t)(uintptr_t)fb_handoff.base;
-#if !defined(__x86_64__)
-    /* On non-x86, the GOP framebuffer addr may need PHYS_MAP_BASE stripped */
-    if (fb_phys >= PHYS_MAP_BASE)
-        fb_phys -= PHYS_MAP_BASE;
-#endif
-    if (virtio_gpu_init(fb_phys, fb_handoff.width, fb_handoff.height) == 0)
+    fb_ctx_t *fb_ctx = fb_get_ctx();
+    uint64_t gpu_backing_phys = 0;
+
+    if (fb_ctx->back_buffer) {
+        gpu_backing_phys = (uint64_t)(uintptr_t)fb_ctx->back_buffer;
+        if (gpu_backing_phys >= PHYS_MAP_BASE)
+            gpu_backing_phys -= PHYS_MAP_BASE;
+        klog("[gpu] using back_buffer as backing: phys=%llx\n",
+             (unsigned long long)gpu_backing_phys);
+    } else {
+        /*
+         * No back buffer (GOP failed or fb_init returned early).
+         * Allocate a fresh page-aligned buffer for virtio-gpu backing.
+         */
+        uint64_t fb_bytes = (uint64_t)gpu_width * gpu_height * 4;
+        uint64_t fb_pages = (fb_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+        gpu_backing_phys = pmm_alloc_pages(fb_pages);
+        if (gpu_backing_phys) {
+            uint32_t *virt = (uint32_t *)(gpu_backing_phys + PHYS_MAP_BASE);
+            memset(virt, 0, (size_t)(fb_pages * PAGE_SIZE));
+
+            fb_handoff.base   = virt;
+            fb_handoff.width  = gpu_width;
+            fb_handoff.height = gpu_height;
+            fb_handoff.pitch  = gpu_width * 4;
+            fb_handoff.bpp    = 32;
+            fb_init(&fb_handoff);
+            klog("[gpu] allocated %llu KB backing buffer at phys=%llx\n",
+                 (unsigned long long)(fb_bytes / 1024),
+                 (unsigned long long)gpu_backing_phys);
+        } else {
+            klog("[gpu] WARNING: cannot allocate GPU backing buffer\n");
+        }
+    }
+
+    if (virtio_gpu_init(gpu_backing_phys,
+                        gpu_width, gpu_height) == 0) {
         klog("[gpu] virtio-gpu display active\n");
-    else
+        fb_swap_buffers();
+    } else {
         klog("[gpu] virtio-gpu not available (using direct framebuffer)\n");
+    }
 
     hid_set_mouse_bounds((int32_t)fb_handoff.width, (int32_t)fb_handoff.height);
 

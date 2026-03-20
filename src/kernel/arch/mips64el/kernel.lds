@@ -1,13 +1,17 @@
 /*
- * AevOS Kernel Linker Script — aarch64 Higher-Half
+ * AevOS Kernel Linker Script — MIPS64 EL
+ *
+ * Uses kseg0 segment: 0xFFFFFFFF80000000 + phys
+ * kseg0 provides direct cached access to physical 0x00000000–0x1FFFFFFF
+ * without TLB translations — suitable for QEMU Malta (up to 256 MB).
  */
 
-OUTPUT_FORMAT("elf64-littleaarch64")
-OUTPUT_ARCH(aarch64)
-ENTRY(kernel_main)
+OUTPUT_FORMAT("elf64-tradlittlemips")
+OUTPUT_ARCH(mips)
+ENTRY(_start)
 
-KERNEL_VBASE = 0xFFFF000000000000;
-KERNEL_PBASE = 0x40080000;
+KERNEL_VBASE = 0xFFFFFFFF80000000;
+KERNEL_PBASE = 0x00200000;
 
 PHDRS
 {
@@ -45,6 +49,8 @@ SECTIONS
         _data_start = .;
         *(.data)
         *(.data.*)
+        *(.got)
+        *(.got.plt)
         . = ALIGN(4096);
         _data_end = .;
     } :data
@@ -54,6 +60,8 @@ SECTIONS
         _bss_start = .;
         *(.bss)
         *(.bss.*)
+        *(.sbss)
+        *(.sbss.*)
         *(COMMON)
         . = ALIGN(4096);
         _bss_end = .;
@@ -68,5 +76,9 @@ SECTIONS
         *(.eh_frame_hdr)
         *(.gnu.hash)
         *(.hash)
+        *(.MIPS.abiflags)
+        *(.MIPS.options)
+        *(.reginfo)
+        *(.pdr)
     }
 }

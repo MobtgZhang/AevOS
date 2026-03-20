@@ -87,7 +87,65 @@ void timer_init(uint32_t freq_hz)
     klog("[timer] LoongArch stable timer at %u Hz (period=%llu)\n", freq_hz, period);
 }
 
-#else /* aarch64, riscv64 — stub */
+#elif defined(__aarch64__)
+
+/*
+ * AArch64 Generic Timer (CNTP_CTL_EL0 / CNTP_TVAL_EL0)
+ */
+
+static uint64_t aarch64_timer_tval;
+
+void timer_init(uint32_t freq_hz)
+{
+    if (freq_hz == 0) freq_hz = TIMER_FREQ_HZ;
+    configured_freq = freq_hz;
+
+    uint64_t cntfrq;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(cntfrq));
+    if (cntfrq == 0) cntfrq = 62500000UL;
+
+    aarch64_timer_tval = cntfrq / freq_hz;
+
+    __asm__ volatile("msr cntp_tval_el0, %0" : : "r"(aarch64_timer_tval));
+    uint64_t ctl = 1;   /* ENABLE=1, IMASK=0 */
+    __asm__ volatile("msr cntp_ctl_el0, %0" : : "r"(ctl));
+
+    tick_count = 0;
+    last_check_tick = 0;
+    klog("[timer] aarch64 generic timer at %u Hz (tval=%llu, cntfrq=%llu)\n",
+         freq_hz, (unsigned long long)aarch64_timer_tval,
+         (unsigned long long)cntfrq);
+}
+
+#elif defined(__mips64)
+
+/*
+ * MIPS64 CP0 Count/Compare timer.
+ * CP0.Count increments at half the pipeline clock rate (QEMU ~100 MHz).
+ */
+
+#define MIPS64_TIMER_FREQ 100000000UL
+
+static uint32_t mips64_timer_period;
+
+void timer_init(uint32_t freq_hz)
+{
+    if (freq_hz == 0) freq_hz = TIMER_FREQ_HZ;
+    configured_freq = freq_hz;
+
+    mips64_timer_period = MIPS64_TIMER_FREQ / freq_hz;
+
+    uint32_t count;
+    __asm__ volatile("mfc0 %0, $9" : "=r"(count));
+    uint32_t compare = count + mips64_timer_period;
+    __asm__ volatile("mtc0 %0, $11" : : "r"(compare));
+
+    tick_count = 0;
+    last_check_tick = 0;
+    klog("[timer] MIPS64 CP0 timer at %u Hz (period=%u)\n", freq_hz, mips64_timer_period);
+}
+
+#else /* riscv64 — stub */
 
 void timer_init(uint32_t freq_hz)
 {
@@ -105,9 +163,21 @@ void timer_init(uint32_t freq_hz)
 void timer_handler(void)
 {
 #if defined(__loongarch64)
-    /* Clear timer interrupt */
     uint64_t clear = 1;
     __asm__ volatile("csrwr %0, 0x44" : "+r"(clear));
+#elif defined(__aarch64__)
+    {
+        extern uint64_t aarch64_timer_tval;
+        __asm__ volatile("msr cntp_tval_el0, %0" : : "r"(aarch64_timer_tval));
+    }
+#elif defined(__mips64)
+    {
+        extern uint32_t mips64_timer_period;
+        uint32_t compare;
+        __asm__ volatile("mfc0 %0, $11" : "=r"(compare));
+        compare += mips64_timer_period;
+        __asm__ volatile("mtc0 %0, $11" : : "r"(compare));
+    }
 #endif
     tick_count++;
 }
@@ -135,6 +205,8 @@ void timer_sleep_ms(uint32_t ms)
         __asm__ volatile("wfi");
 #elif defined(__loongarch64)
         __asm__ volatile("idle 0");
+#elif defined(__mips64)
+        __asm__ volatile("wait");
 #endif
     }
 }

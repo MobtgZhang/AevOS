@@ -93,3 +93,4 @@ bool input_wait(input_event_t *ev);
 void input_get_mouse_pos(int32_t *x, int32_t *y);
 uint8_t input_get_mouse_buttons(void);
 keycode_t input_scancode_to_keycode(uint8_t scancode, bool extended);
+void hid_poll_serial(void);

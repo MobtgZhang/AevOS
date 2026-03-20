@@ -1,113 +1,78 @@
 /*
- * x86-64 IRQ stub wrappers.
+ * ISR / IRQ stubs for x86_64 — GAS syntax, long mode
  *
- * Each stub saves caller-saved registers, calls the C handler,
- * sends EOI to the 8259 PIC, restores registers, and iretq.
- *
- * IRQ0  (vector 0x20) — PIT timer
- * IRQ1  (vector 0x21) — PS/2 keyboard
- * IRQ12 (vector 0x2C) — PS/2 mouse  (slave PIC IRQ4)
+ * IRQ stubs push a dummy error code and the vector number,
+ * save all GPRs, call the C dispatcher isr_dispatch(), restore, iretq.
  */
 
-.section .text
+.text
 .code64
 
-/* ── IRQ0: Timer ───────────────────────────────────────── */
+.extern isr_dispatch
 
-.global irq0_stub
-irq0_stub:
-    push %rax
-    push %rcx
-    push %rdx
-    push %rdi
-    push %rsi
-    push %r8
-    push %r9
-    push %r10
-    push %r11
-    cld
+/*
+ * IRQ stubs for the PIC-remapped vectors:
+ *   IRQ0  = vector 0x20 (timer)
+ *   IRQ1  = vector 0x21 (keyboard)
+ *   IRQ12 = vector 0x2C (mouse)
+ */
 
-    call timer_handler
+.macro IRQ_STUB name, vector
+    .global \name
+    \name:
+        pushq $0              /* dummy error code */
+        pushq $\vector        /* interrupt vector  */
+        jmp   isr_common
+.endm
 
-    /* EOI to master PIC */
-    mov  $0x20, %al
-    outb %al,   $0x20
+IRQ_STUB irq0_stub,  0x20
+IRQ_STUB irq1_stub,  0x21
+IRQ_STUB irq12_stub, 0x2C
 
-    pop  %r11
-    pop  %r10
-    pop  %r9
-    pop  %r8
-    pop  %rsi
-    pop  %rdi
-    pop  %rdx
-    pop  %rcx
-    pop  %rax
+isr_common:
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+
+    movq  %rsp, %rdi           /* arg0 = pointer to saved regs + vector */
+
+    /* Read the vector number from the stack frame */
+    movq  120(%rsp), %rsi      /* arg1 = vector (15 regs * 8 = 120 bytes above) */
+
+    movq  %rsp, %rbp
+    andq  $~0xF, %rsp          /* 16-byte align for System V ABI */
+    call  isr_dispatch
+    movq  %rbp, %rsp
+
+    popq  %r15
+    popq  %r14
+    popq  %r13
+    popq  %r12
+    popq  %r11
+    popq  %r10
+    popq  %r9
+    popq  %r8
+    popq  %rbp
+    popq  %rdi
+    popq  %rsi
+    popq  %rdx
+    popq  %rcx
+    popq  %rbx
+    popq  %rax
+
+    addq  $16, %rsp            /* pop vector + error code */
     iretq
 
-/* ── IRQ1: Keyboard ────────────────────────────────────── */
-
-.global irq1_stub
-irq1_stub:
-    push %rax
-    push %rcx
-    push %rdx
-    push %rdi
-    push %rsi
-    push %r8
-    push %r9
-    push %r10
-    push %r11
-    cld
-
-    call keyboard_handler
-
-    /* EOI to master PIC */
-    mov  $0x20, %al
-    outb %al,   $0x20
-
-    pop  %r11
-    pop  %r10
-    pop  %r9
-    pop  %r8
-    pop  %rsi
-    pop  %rdi
-    pop  %rdx
-    pop  %rcx
-    pop  %rax
-    iretq
-
-/* ── IRQ12: Mouse ──────────────────────────────────────── */
-
-.global irq12_stub
-irq12_stub:
-    push %rax
-    push %rcx
-    push %rdx
-    push %rdi
-    push %rsi
-    push %r8
-    push %r9
-    push %r10
-    push %r11
-    cld
-
-    call mouse_handler
-
-    /* EOI to slave PIC, then master PIC */
-    mov  $0x20, %al
-    outb %al,   $0xA0
-    outb %al,   $0x20
-
-    pop  %r11
-    pop  %r10
-    pop  %r9
-    pop  %r8
-    pop  %rsi
-    pop  %rdi
-    pop  %rdx
-    pop  %rcx
-    pop  %rax
-    iretq
-
-/* Mark stack as non-executable */
-.section .note.GNU-stack,"",@progbits
+.section .note.GNU-stack, "", @progbits

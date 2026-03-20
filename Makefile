@@ -2,9 +2,10 @@
 #  AevOS — Autonomous Evolving OS
 #  Multi-Architecture Makefile (UEFI boot, C17)
 #
-#  Supported: ARCH = x86_64 | aarch64 | riscv64 | loongarch64
+#  Supported: ARCH = x86_64 | aarch64 | riscv64 | loongarch64 | mips64el
 #  Usage:     make ARCH=x86_64
 #             make ARCH=aarch64
+#             make ARCH=mips64el
 #             make clean
 # ============================================================
 
@@ -13,6 +14,7 @@ SRCDIR := src
 
 # LoongArch Virt EDK2 (optional; override if firmware lives elsewhere)
 AEVOS_LOONGARCH_FW ?= /home/mobtgzhang/Firmware/LoongArchVirtMachine
+AEVOS_MIPS64_FW    ?= /home/mobtgzhang/Firmware/Mips64VirtMachine
 
 # ============================================================
 #  Architecture-specific configuration
@@ -45,8 +47,12 @@ else ifeq ($(ARCH),aarch64)
   EFI_BOOT_NAME  := BOOTAA64.EFI
   BOOT_ELF_FMT   := elf64-littleaarch64
   QEMU_CMD       := qemu-system-aarch64
-  QEMU_EXTRA     := -M virt -cpu cortex-a72
-  QEMU_RUN_DEVS  := -device usb-ehci -device usb-mouse
+  QEMU_EXTRA     := -M virt -cpu cortex-a72 -smp 2 \
+                    -device virtio-gpu-pci \
+                    -device nec-usb-xhci,id=xhci \
+                    -device usb-tablet,bus=xhci.0,port=1 \
+                    -device usb-kbd,bus=xhci.0,port=2
+  QEMU_RUN_DEVS  :=
 
 else ifeq ($(ARCH),riscv64)
   CROSS_PREFIX   := riscv64-elf-
@@ -82,8 +88,27 @@ else ifeq ($(ARCH),loongarch64)
                     -device usb-kbd,bus=xhci.0,port=2
   QEMU_RUN_DEVS  :=
 
+else ifeq ($(ARCH),mips64el)
+  CROSS_PREFIX   := mips64el-linux-gnuabi64-
+  CROSS_PREFIX2  := mips64el-linux-gnu-
+  ARCH_SUBDIR    := mips64el
+  KCFLAGS_ARCH   := -mips64r2 -mabi=64 -EL -mno-abicalls -fno-pic -G0
+  BOOT_CFLAGS_ARCH := -mips64r2 -mabi=64 -EL -G0
+  KERNEL_LDS     := $(SRCDIR)/kernel/arch/mips64el/kernel.lds
+  BOOT_LDS       := $(SRCDIR)/boot/linker_boot.lds
+  EFI_TARGET_FMT := elf64-tradlittlemips
+  EFI_BOOT_NAME  := BOOTMIPS64.EFI
+  BOOT_ELF_FMT   := elf64-tradlittlemips
+  QEMU_CMD       := qemu-system-mips64el
+  QEMU_EXTRA     := -M malta -cpu MIPS64R2-generic \
+                    -device virtio-gpu-pci \
+                    -device nec-usb-xhci,id=xhci \
+                    -device usb-tablet,bus=xhci.0,port=1 \
+                    -device usb-kbd,bus=xhci.0,port=2
+  QEMU_RUN_DEVS  :=
+
 else
-  $(error Unsupported ARCH=$(ARCH). Choose: x86_64, aarch64, riscv64, loongarch64)
+  $(error Unsupported ARCH=$(ARCH). Choose: x86_64, aarch64, riscv64, loongarch64, mips64el)
 endif
 
 # ---- Toolchain (try bare-metal, then linux-gnu, then host) ----
@@ -134,6 +159,12 @@ GNUEFI_INC   := /usr/include/efi
 GNUEFI_CRT0  := $(GNUEFI_DIR)/crt0-efi-x86_64.o
 
 ifeq ($(ARCH),x86_64)
+BOOT_CFLAGS := -std=c17 -Wall -Wextra -O2 \
+               -ffreestanding -fno-stack-protector \
+               -fpic -fshort-wchar \
+               -I$(SRCDIR)/include \
+               $(BOOT_CFLAGS_ARCH)
+else ifeq ($(ARCH),mips64el)
 BOOT_CFLAGS := -std=c17 -Wall -Wextra -O2 \
                -ffreestanding -fno-stack-protector \
                -fpic -fshort-wchar \
@@ -235,8 +266,8 @@ ifeq ($(ARCH),x86_64)
     OVMF_VARS_SRC := $(firstword $(foreach f,/usr/share/OVMF/OVMF_VARS.fd,$(if $(wildcard $(f)),$(f),)))
   endif
 else ifeq ($(ARCH),aarch64)
-  OVMF_CODE := $(firstword $(foreach f,/usr/share/AAVMF/AAVMF_CODE.fd,$(if $(wildcard $(f)),$(f),)))
-  OVMF_VARS_SRC := $(firstword $(foreach f,/usr/share/AAVMF/AAVMF_VARS.fd,$(if $(wildcard $(f)),$(f),)))
+  OVMF_CODE := $(firstword $(foreach f,/usr/share/AAVMF/AAVMF_CODE.fd /usr/share/edk2/aarch64/QEMU_EFI.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd,$(if $(wildcard $(f)),$(f),)))
+  OVMF_VARS_SRC := $(firstword $(foreach f,/usr/share/AAVMF/AAVMF_VARS.fd /usr/share/edk2/aarch64/vars-template-pflash.raw,$(if $(wildcard $(f)),$(f),)))
 else ifeq ($(ARCH),riscv64)
   OVMF_CODE := $(firstword $(foreach f,/usr/share/OVMF/OVMF_CODE_RISCV64.fd /usr/share/qemu/firmware/edk2-riscv64-code.fd,$(if $(wildcard $(f)),$(f),)))
   OVMF_VARS_SRC := $(firstword $(foreach f,/usr/share/OVMF/OVMF_VARS_RISCV64.fd /usr/share/qemu/firmware/edk2-riscv64-vars.fd,$(if $(wildcard $(f)),$(f),)))
@@ -248,6 +279,9 @@ else ifeq ($(ARCH),loongarch64)
     OVMF_CODE := $(firstword $(foreach f,/usr/share/OVMF/OVMF_CODE_LOONGARCH64.fd /usr/share/edk2/loongarch64/QEMU_EFI.fd,$(if $(wildcard $(f)),$(f),)))
     OVMF_VARS_SRC := $(firstword $(foreach f,/usr/share/OVMF/OVMF_VARS_LOONGARCH64.fd /usr/share/edk2/loongarch64/QEMU_VARS.fd,$(if $(wildcard $(f)),$(f),)))
   endif
+else ifeq ($(ARCH),mips64el)
+  OVMF_CODE := $(firstword $(foreach f,$(AEVOS_MIPS64_FW)/QEMU_EFI.fd /usr/share/edk2/mips64el/QEMU_EFI.fd,$(if $(wildcard $(f)),$(f),)))
+  OVMF_VARS_SRC := $(firstword $(foreach f,$(AEVOS_MIPS64_FW)/QEMU_VARS.fd /usr/share/edk2/mips64el/QEMU_VARS.fd,$(if $(wildcard $(f)),$(f),)))
 endif
 
 OVMF_IS_COMBINED := $(if $(findstring OVMF.fd,$(notdir $(OVMF_CODE))),$(if $(findstring CODE,$(notdir $(OVMF_CODE))),,yes),)
@@ -265,8 +299,13 @@ else
   QEMU_FIRMWARE :=
 endif
 
-# LoongArch virt uses -bios (pflash requires blockdev syntax on this platform)
+# LoongArch / MIPS64 virt uses -bios
 ifeq ($(ARCH),loongarch64)
+  ifneq ($(OVMF_CODE),)
+    QEMU_FIRMWARE := -bios $(OVMF_CODE)
+  endif
+endif
+ifeq ($(ARCH),mips64el)
   ifneq ($(OVMF_CODE),)
     QEMU_FIRMWARE := -bios $(OVMF_CODE)
   endif
@@ -297,8 +336,10 @@ help:
 	@echo "  make ARCH=aarch64     Build for ARM64"
 	@echo "  make ARCH=riscv64     Build for RISC-V 64"
 	@echo "  make ARCH=loongarch64 Build for LoongArch 64"
+	@echo "  make ARCH=mips64el   Build for MIPS64 EL"
 	@echo "  make run              Build and run in QEMU (current ARCH)"
 	@echo "  LoongArch firmware:   AEVOS_LOONGARCH_FW (default: ~/Firmware/LoongArchVirtMachine)"
+	@echo "  MIPS64 firmware:      AEVOS_MIPS64_FW (custom UEFI firmware path)"
 	@echo "  make clean            Remove all build artifacts"
 	@echo ""
 
@@ -409,6 +450,16 @@ image: boot kernel
 #  Run in QEMU
 # ============================================================
 
+ifeq ($(ARCH),mips64el)
+run: kernel
+	@echo "  QEMU [$(ARCH)]  $(KERNEL_ELF) (direct -kernel boot)"
+	$(QEMU_CMD) \
+	    $(QEMU_EXTRA) \
+	    -kernel $(KERNEL_ELF) \
+	    -m 256 \
+	    -net none \
+	    -nographic
+else
 run: image
 	@echo "  QEMU [$(ARCH)]  $(DISK_IMAGE)"
 	@test -n "$(OVMF_CODE)" || (echo "  ERROR: UEFI firmware not found for $(ARCH). Install ovmf." && false)
@@ -421,6 +472,7 @@ run: image
 	    -serial stdio \
 	    -net none \
 	    $(QEMU_RUN_DEVS)
+endif
 
 # ============================================================
 #  Clean

@@ -72,9 +72,90 @@ void serial_init(uint16_t port)
     uart_ready = true;
 }
 
+#elif defined(__aarch64__)
+
+/*
+ * ARM PL011 UART driver for QEMU aarch64 virt.
+ *
+ * PL011 has 32-bit registers at word-aligned offsets, which is
+ * completely different from the 16550 byte-offset layout.
+ */
+
+#define PL011_DR     0x000   /* Data Register */
+#define PL011_FR     0x018   /* Flag Register */
+#define PL011_IBRD   0x024   /* Integer Baud Rate Divisor */
+#define PL011_FBRD   0x028   /* Fractional Baud Rate Divisor */
+#define PL011_LCR_H  0x030   /* Line Control */
+#define PL011_CR     0x034   /* Control Register */
+#define PL011_IMSC   0x038   /* Interrupt Mask Set/Clear */
+#define PL011_ICR    0x044   /* Interrupt Clear */
+
+#define PL011_FR_TXFF  (1u << 5)   /* Transmit FIFO full */
+#define PL011_FR_RXFE  (1u << 4)   /* Receive FIFO empty */
+
+#define PL011_CR_UARTEN (1u << 0)
+#define PL011_CR_TXE    (1u << 8)
+#define PL011_CR_RXE    (1u << 9)
+
+#define PL011_LCR_WLEN8 (3u << 5)  /* 8-bit word */
+#define PL011_LCR_FEN   (1u << 4)  /* Enable FIFOs */
+
+static volatile uint32_t *pl011_base = NULL;
+
+static inline uint32_t pl011_read(uint32_t off)
+{
+    return pl011_base ? *(volatile uint32_t *)((uint8_t *)pl011_base + off) : 0;
+}
+
+static inline void pl011_write(uint32_t off, uint32_t val)
+{
+    if (pl011_base) *(volatile uint32_t *)((uint8_t *)pl011_base + off) = val;
+}
+
+void serial_init(uint16_t port)
+{
+    (void)port;
+    uart_ready = false;
+
+#ifdef SERIAL_MMIO_BASE
+    pl011_base = (volatile uint32_t *)SERIAL_MMIO_BASE;
+#else
+    return;
+#endif
+
+    pl011_write(PL011_CR, 0);
+    pl011_write(PL011_ICR, 0x7FF);
+    pl011_write(PL011_IMSC, 0);
+
+    /* 115200 baud at 24 MHz reference clock (QEMU virt default):
+     * divisor = 24000000 / (16 * 115200) = 13.0208
+     * IBRD = 13, FBRD = round(0.0208 * 64) = 1 */
+    pl011_write(PL011_IBRD, 13);
+    pl011_write(PL011_FBRD, 1);
+
+    pl011_write(PL011_LCR_H, PL011_LCR_WLEN8 | PL011_LCR_FEN);
+    pl011_write(PL011_CR, PL011_CR_UARTEN | PL011_CR_TXE | PL011_CR_RXE);
+
+    uart_ready = true;
+}
+
+static void pl011_putchar(char c)
+{
+    while (pl011_read(PL011_FR) & PL011_FR_TXFF)
+        ;
+    pl011_write(PL011_DR, (uint32_t)(uint8_t)c);
+}
+
+static int pl011_getchar(void)
+{
+    if (pl011_read(PL011_FR) & PL011_FR_RXFE)
+        return -1;
+    return (int)(pl011_read(PL011_DR) & 0xFF);
+}
+
 #else
 
-/* ── Non-x86: MMIO UART ─────────────────────────────── */
+/* ── Non-x86, non-aarch64: generic MMIO 16550 UART ──── */
 static volatile uint8_t *uart_base = NULL;
 
 static inline void uart_out(uint16_t reg, uint8_t val)
@@ -126,13 +207,19 @@ void serial_init(uint16_t port)
     uart_ready = true;
 }
 
-#endif /* SERIAL_USE_PIO */
+#endif /* SERIAL_USE_PIO / __aarch64__ / fallback */
 
-/* ── Common API (shared between PIO and MMIO) ────────── */
+/* ── Common API ──────────────────────────────────────── */
 
 void serial_putchar(char c)
 {
     if (!uart_ready) return;
+
+#if defined(__aarch64__)
+    if (c == '\n')
+        pl011_putchar('\r');
+    pl011_putchar(c);
+#else
     while (!(uart_in(UART_LSR) & UART_LSR_TX_EMPTY))
         ;
     if (c == '\n') {
@@ -141,6 +228,7 @@ void serial_putchar(char c)
             ;
     }
     uart_out(UART_DATA, (uint8_t)c);
+#endif
 }
 
 void serial_puts(const char *s)
@@ -152,9 +240,14 @@ void serial_puts(const char *s)
 int serial_read(void)
 {
     if (!uart_ready) return -1;
+
+#if defined(__aarch64__)
+    return pl011_getchar();
+#else
     if (!(uart_in(UART_LSR) & UART_LSR_RX_READY))
         return -1;
     return uart_in(UART_DATA);
+#endif
 }
 
 void serial_write(const void *buf, size_t len)

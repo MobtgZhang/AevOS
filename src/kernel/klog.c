@@ -214,6 +214,8 @@ void kpanic(const char *fmt, ...)
         __asm__ volatile("csrci mstatus, 8\n\twfi");
 #elif defined(__loongarch64)
         __asm__ volatile("idle 0");
+#elif defined(__mips64)
+        __asm__ volatile("wait");
 #else
         while(1);
 #endif

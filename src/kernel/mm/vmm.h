@@ -22,17 +22,37 @@
 
 #elif defined(__aarch64__)
 
+/*
+ * ARM64 page table descriptors (4KB granule, 4-level):
+ *   Table:  bits[1:0] = 0b11   Block (L1/L2): bits[1:0] = 0b01
+ *   Page (L3): bits[1:0] = 0b11
+ *
+ * PTE_WRITABLE is 0 because ARM64 defaults to RW; read-only is
+ * indicated by setting AP[2] (bit 7).  The table-type bit (bit 1)
+ * is handled by ARM64_TABLE_DESC in architecture-specific code.
+ */
 #define PTE_PRESENT       (1ULL << 0)
 #define PTE_WRITABLE      (0ULL)
 #define PTE_USER          (1ULL << 6)
 #define PTE_WRITE_THROUGH (0ULL)
-#define PTE_NO_CACHE      (0ULL)
+#define PTE_NO_CACHE      (1ULL << 2)   /* AttrIndx bit: selects Device attr */
 #define PTE_ACCESSED      (1ULL << 10)
 #define PTE_DIRTY         (1ULL << 51)
 #define PTE_HUGE          (0ULL)
 #define PTE_GLOBAL        (0ULL)
 #define PTE_NX            (1ULL << 54)
 #define PTE_ADDR_MASK     0x0000FFFFFFFFF000ULL
+
+/* ARM64-specific descriptor helpers (used by vmm.c and boot) */
+#define ARM64_TABLE_DESC    (3ULL)             /* Valid + Table */
+#define ARM64_BLOCK_DESC    (1ULL)             /* Valid + Block */
+#define ARM64_ATTR_IDX(n)   ((uint64_t)(n) << 2)
+#define ARM64_SH_INNER      (3ULL << 8)
+#define ARM64_AF             (1ULL << 10)
+#define ARM64_BLOCK_NORMAL  (ARM64_BLOCK_DESC | ARM64_ATTR_IDX(2) | \
+                             ARM64_SH_INNER | ARM64_AF)
+#define ARM64_BLOCK_DEVICE  (ARM64_BLOCK_DESC | ARM64_ATTR_IDX(0) | \
+                             ARM64_SH_INNER | ARM64_AF)
 
 #elif defined(__riscv)
 
@@ -60,6 +80,24 @@
 #define PTE_HUGE          (1ULL << 7)
 #define PTE_GLOBAL        (1ULL << 8)
 #define PTE_NX            (1ULL << 63)
+#define PTE_ADDR_MASK     0x00FFFFFFFFFFF000ULL
+
+#elif defined(__mips64)
+
+/*
+ * MIPS64 uses xkphys for kernel (no software page tables needed).
+ * These definitions are provided for interface consistency.
+ */
+#define PTE_PRESENT       (1ULL << 0)
+#define PTE_WRITABLE      (1ULL << 1)
+#define PTE_USER          (1ULL << 2)
+#define PTE_WRITE_THROUGH (0ULL)
+#define PTE_NO_CACHE      (1ULL << 4)
+#define PTE_ACCESSED      (0ULL)
+#define PTE_DIRTY         (1ULL << 6)
+#define PTE_HUGE          (1ULL << 7)
+#define PTE_GLOBAL        (1ULL << 8)
+#define PTE_NX            (0ULL)
 #define PTE_ADDR_MASK     0x00FFFFFFFFFFF000ULL
 
 #else

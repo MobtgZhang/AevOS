@@ -375,6 +375,96 @@ static EFI_STATUS setup_page_tables(EFI_BOOT_SERVICES *bs,
 
 #endif /* __x86_64__ */
 
+/* ── Set up aarch64 page tables (TTBR0 identity + TTBR1 higher-half) ── */
+
+#if defined(__aarch64__)
+
+/*
+ * Map 8 GiB so that all of QEMU virt RAM is reachable even when UEFI
+ * allocates boot_info or page tables above the 4 GiB boundary (common
+ * with -m 4G where RAM spans physical 1–5 GiB).
+ *
+ * Layout per direction: 1 L0 + 1 L1 + 8 L2 = 10 pages × 2 = 20 pages.
+ */
+#define AARCH64_MAP_GIB   8
+#define AARCH64_PT_PAGES  (2 * (1 + 1 + AARCH64_MAP_GIB))  /* 20 */
+
+#define ARM64_VALID         (1ULL)
+#define ARM64_TABLE         (1ULL << 1)
+#define ARM64_TABLE_DESC    (ARM64_VALID | ARM64_TABLE)
+#define ARM64_ATTR_IDX(n)   ((UINT64)(n) << 2)
+#define ARM64_SH_INNER      (3ULL << 8)
+#define ARM64_AF             (1ULL << 10)
+#define ARM64_BLOCK_NORMAL  (ARM64_VALID | ARM64_ATTR_IDX(2) | \
+                             ARM64_SH_INNER | ARM64_AF)
+#define ARM64_BLOCK_DEVICE  (ARM64_VALID | ARM64_ATTR_IDX(0) | \
+                             ARM64_SH_INNER | ARM64_AF)
+
+/* QEMU virt aarch64: RAM starts at 1 GiB; everything below is device I/O */
+#define AARCH64_DEVICE_TOP  0x40000000ULL
+
+static EFI_STATUS setup_aarch64_page_tables(EFI_BOOT_SERVICES *bs,
+                                             UINT64 *ttbr0_out,
+                                             UINT64 *ttbr1_out)
+{
+    EFI_PHYSICAL_ADDRESS pt_base = 0;
+    EFI_STATUS status = bs->AllocatePages(AllocateAnyPages, EfiLoaderData,
+                                           AARCH64_PT_PAGES, &pt_base);
+    if (status != EFI_SUCCESS) return status;
+
+    boot_memset((void *)(UINTN)pt_base, 0, AARCH64_PT_PAGES * 4096);
+
+    int page_idx = 0;
+
+    /* TTBR0 tables (identity map) */
+    UINT64 *l0_id = (UINT64 *)(UINTN)(pt_base + page_idx++ * 0x1000);
+    UINT64 *l1_id = (UINT64 *)(UINTN)(pt_base + page_idx++ * 0x1000);
+    UINT64 *l2_id[AARCH64_MAP_GIB];
+    for (int i = 0; i < AARCH64_MAP_GIB; i++)
+        l2_id[i] = (UINT64 *)(UINTN)(pt_base + page_idx++ * 0x1000);
+
+    /* TTBR1 tables (higher-half map) */
+    UINT64 *l0_hi = (UINT64 *)(UINTN)(pt_base + page_idx++ * 0x1000);
+    UINT64 *l1_hi = (UINT64 *)(UINTN)(pt_base + page_idx++ * 0x1000);
+    UINT64 *l2_hi[AARCH64_MAP_GIB];
+    for (int i = 0; i < AARCH64_MAP_GIB; i++)
+        l2_hi[i] = (UINT64 *)(UINTN)(pt_base + page_idx++ * 0x1000);
+
+    /* TTBR0 L0[0] → L1, L1[0..N-1] → L2 tables */
+    l0_id[0] = (UINT64)(UINTN)l1_id | ARM64_TABLE_DESC;
+    for (int i = 0; i < AARCH64_MAP_GIB; i++)
+        l1_id[i] = (UINT64)(UINTN)l2_id[i] | ARM64_TABLE_DESC;
+
+    /* Identity map: 8 GiB using 2 MB block descriptors.
+     * Addresses below AARCH64_DEVICE_TOP (1 GiB) are PCI/GIC/UART
+     * MMIO and must use Device-nGnRnE attributes.  Above that is RAM. */
+    for (int g = 0; g < AARCH64_MAP_GIB; g++)
+        for (int i = 0; i < 512; i++) {
+            UINT64 phys = ((UINT64)g * 512 + (UINT64)i) * 0x200000ULL;
+            l2_id[g][i] = phys | (phys < AARCH64_DEVICE_TOP
+                                  ? ARM64_BLOCK_DEVICE : ARM64_BLOCK_NORMAL);
+        }
+
+    /* TTBR1 L0[0] → L1, L1[0..N-1] → L2 tables */
+    l0_hi[0] = (UINT64)(UINTN)l1_hi | ARM64_TABLE_DESC;
+    for (int i = 0; i < AARCH64_MAP_GIB; i++)
+        l1_hi[i] = (UINT64)(UINTN)l2_hi[i] | ARM64_TABLE_DESC;
+
+    /* Higher-half: same 8 GiB physical → KERNEL_VBASE + phys */
+    for (int g = 0; g < AARCH64_MAP_GIB; g++)
+        for (int i = 0; i < 512; i++) {
+            UINT64 phys = ((UINT64)g * 512 + (UINT64)i) * 0x200000ULL;
+            l2_hi[g][i] = phys | (phys < AARCH64_DEVICE_TOP
+                                  ? ARM64_BLOCK_DEVICE : ARM64_BLOCK_NORMAL);
+        }
+
+    *ttbr0_out = (UINT64)(UINTN)l0_id;
+    *ttbr1_out = (UINT64)(UINTN)l0_hi;
+    return EFI_SUCCESS;
+}
+
+#endif /* __aarch64__ */
+
 /* ── Memory map conversion ────────────────────────────── */
 
 static mmap_type_t efi_to_aevos_memtype(UINT32 efi_type) {
@@ -506,6 +596,19 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     print(u"[pt] PML4 at ");
     print_hex(pt_base);
     print(u"\r\n");
+#elif defined(__aarch64__)
+    print(u"[pt] Setting up aarch64 page tables...\r\n");
+    UINT64 ttbr0 = 0, ttbr1 = 0;
+    status = setup_aarch64_page_tables(bs, &ttbr0, &ttbr1);
+    if (status != EFI_SUCCESS) {
+        print(u"FATAL: cannot set up page tables\r\n");
+        for (;;);
+    }
+    print(u"[pt] TTBR0=");
+    print_hex(ttbr0);
+    print(u" TTBR1=");
+    print_hex(ttbr1);
+    print(u"\r\n");
 #endif
 
     /* 7. Get memory map and ExitBootServices */
@@ -583,6 +686,97 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 #if defined(__x86_64__)
     /* Load our page tables (identity + higher-half) */
     __asm__ volatile("mov %0, %%cr3" : : "r"(pt_base) : "memory");
+
+#elif defined(__aarch64__)
+    {
+        /*
+         * AArch64 MMU reconfiguration.
+         *
+         * UEFI already had the MMU enabled.  We replace the translation
+         * tables with our own that provide:
+         *   TTBR0_EL1 → identity map  (0x0000_xxxx_xxxx_xxxx)
+         *   TTBR1_EL1 → higher-half   (0xFFFF_xxxx_xxxx_xxxx)
+         *
+         * Steps: disable MMU → configure MAIR/TCR/TTBRs → re-enable.
+         */
+        UINT64 sctlr;
+        __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+        sctlr &= ~(1ULL << 0);  /* M: disable MMU */
+        __asm__ volatile(
+            "msr sctlr_el1, %0\n\t"
+            "isb"
+            : : "r"(sctlr) : "memory"
+        );
+
+        /* MAIR_EL1: Attr0=Device-nGnRnE, Attr1=Normal NC, Attr2=Normal WB */
+        UINT64 mair = (0x00ULL)        |
+                      (0x44ULL << 8)   |
+                      (0xFFULL << 16);
+        __asm__ volatile("msr mair_el1, %0" : : "r"(mair));
+
+        /*
+         * TCR_EL1:
+         *   T0SZ=16  (48-bit VA for TTBR0)   T1SZ=16  (48-bit VA for TTBR1)
+         *   TG0=4KB  TG1=4KB
+         *   IPS=48-bit physical address space
+         *   Inner-shareable, Write-back cacheable walks
+         */
+        UINT64 tcr = (16ULL << 0)  |   /* T0SZ  */
+                     (1ULL  << 8)  |   /* IRGN0 */
+                     (1ULL  << 10) |   /* ORGN0 */
+                     (3ULL  << 12) |   /* SH0   */
+                     (16ULL << 16) |   /* T1SZ  */
+                     (1ULL  << 24) |   /* IRGN1 */
+                     (1ULL  << 26) |   /* ORGN1 */
+                     (3ULL  << 28) |   /* SH1   */
+                     (2ULL  << 30) |   /* TG1=4KB */
+                     (5ULL  << 32);    /* IPS=48-bit */
+        __asm__ volatile("msr tcr_el1, %0" : : "r"(tcr));
+
+        /* Install page tables */
+        __asm__ volatile("msr ttbr0_el1, %0" : : "r"(ttbr0));
+        __asm__ volatile("msr ttbr1_el1, %0" : : "r"(ttbr1));
+
+        /* Full TLB invalidate + barriers */
+        __asm__ volatile(
+            "isb\n\t"
+            "tlbi vmalle1\n\t"
+            "dsb sy\n\t"
+            "isb"
+        );
+
+        /* Re-enable MMU, D-cache, I-cache */
+        __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+        sctlr |= (1ULL << 0) | (1ULL << 2) | (1ULL << 12);
+        __asm__ volatile(
+            "msr sctlr_el1, %0\n\t"
+            "isb"
+            : : "r"(sctlr) : "memory"
+        );
+    }
+#endif
+
+#if defined(__mips64) || defined(__mips__)
+    {
+        /*
+         * MIPS64 UEFI path: ensure 64-bit kernel mode (Status.KX=1) and
+         * convert the stack pointer to kseg0 so the kernel can use it
+         * without TLB translations.
+         */
+        UINT32 sr;
+        __asm__ volatile("mfc0 %0, $12" : "=r"(sr));
+        sr |= (1u << 7) | (1u << 6) | (1u << 5); /* KX, SX, UX */
+        sr &= ~((1u << 22) | (1u << 2));          /* clear BEV, ERL */
+        __asm__ volatile("mtc0 %0, $12\n\t.set push\n\t.set noreorder\n\tnop\n\tnop\n\t.set pop" : : "r"(sr));
+
+        UINT64 sp_val;
+        __asm__ volatile("move %0, $sp" : "=r"(sp_val));
+        /* Convert low physical SP to kseg0 address */
+        if (sp_val < 0x20000000ULL) {
+            sp_val |= 0xFFFFFFFF80000000ULL;
+            __asm__ volatile("move $sp, %0" : : "r"(sp_val));
+        }
+    }
 #endif
 
 #if defined(__loongarch64) || defined(__loongarch__)

@@ -137,19 +137,18 @@ static void fb_memset32(uint32_t *dst, uint32_t val, size_t count)
 
 void fb_init(framebuffer_t *boot_fb)
 {
-    if (!boot_fb || !boot_fb->base) return;
+    if (!boot_fb || (boot_fb->width == 0) || (boot_fb->height == 0))
+        return;
 
     fb.pixels    = boot_fb->base;
     fb.width     = boot_fb->width;
     fb.height    = boot_fb->height;
-    fb.pitch     = boot_fb->pitch;
-    fb.bpp       = boot_fb->bpp;
-    fb.phys_base = (uint64_t)(uintptr_t)boot_fb->base;
+    fb.pitch     = boot_fb->pitch ? boot_fb->pitch : boot_fb->width * 4;
+    fb.bpp       = boot_fb->bpp ? boot_fb->bpp : 32;
 
-    /*
-     * Allocate back buffer via page allocator — the slab max is 64 KB
-     * but a typical framebuffer is several MB.
-     */
+    uint64_t raw_base = (uint64_t)(uintptr_t)boot_fb->base;
+    fb.phys_base = (raw_base >= PHYS_MAP_BASE) ? (raw_base - PHYS_MAP_BASE) : raw_base;
+
     size_t buf_size = (size_t)fb.height * fb.pitch;
     size_t buf_pages = (buf_size + PAGE_SIZE - 1) / PAGE_SIZE;
     uint64_t bb_phys = pmm_alloc_pages(buf_pages);
@@ -161,8 +160,14 @@ void fb_init(framebuffer_t *boot_fb)
     fb.double_buffered = (fb.back_buffer != NULL);
 
     fb_clear(0x00000000);
-    klog("[gpu_fb] framebuffer %ux%u pitch=%u bpp=%u double_buf=%s\n",
+
+    if (fb.back_buffer && fb.pixels) {
+        fb_memcpy(fb.pixels, fb.back_buffer, buf_size);
+    }
+
+    klog("[gpu_fb] framebuffer %ux%u pitch=%u bpp=%u base=%p double_buf=%s\n",
          fb.width, fb.height, fb.pitch, fb.bpp,
+         (void *)fb.pixels,
          fb.double_buffered ? "yes" : "no");
 }
 
@@ -423,12 +428,12 @@ void fb_alpha_blend_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
 
 void fb_swap_buffers(void)
 {
-    if (!fb.back_buffer || !fb.pixels) return;
-    size_t buf_size = (size_t)fb.height * fb.pitch;
-    fb_memcpy(fb.pixels, fb.back_buffer, buf_size);
+    if (!fb.back_buffer) return;
 
-    /* Notify virtio-gpu to refresh the display (required on LoongArch etc.) */
     if (virtio_gpu_available()) {
         virtio_gpu_flush(0, 0, fb.width, fb.height);
+    } else if (fb.pixels) {
+        size_t buf_size = (size_t)fb.height * fb.pitch;
+        fb_memcpy(fb.pixels, fb.back_buffer, buf_size);
     }
 }

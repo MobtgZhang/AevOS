@@ -92,11 +92,18 @@ static inline void invlpg(uint64_t addr) {
     __asm__ volatile("tlbi vaae1is, %0\n\tdsb sy\n\tisb" : : "r"(addr >> 12));
 }
 static inline void write_cr3(uint64_t val) {
-    __asm__ volatile("msr ttbr0_el1, %0\n\tisb" : : "r"(val));
+    __asm__ volatile(
+        "msr ttbr1_el1, %0\n\t"
+        "isb\n\t"
+        "tlbi vmalle1\n\t"
+        "dsb sy\n\t"
+        "isb"
+        : : "r"(val) : "memory"
+    );
 }
 static inline uint64_t read_cr3(void) {
     uint64_t val;
-    __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(val));
+    __asm__ volatile("mrs %0, ttbr1_el1" : "=r"(val));
     return val;
 }
 static inline void io_wait(void) { __asm__ volatile("nop"); }
@@ -156,6 +163,42 @@ static inline uint64_t read_cr3(void) {
     uint64_t val;
     __asm__ volatile("csrrd %0, 0x19" : "=r"(val));
     return val;
+}
+static inline void io_wait(void) { __asm__ volatile("nop"); }
+
+/* ── mips64 ──────────────────────────────────────────────── */
+#elif defined(__mips64)
+
+static inline void outb(uint16_t port, uint8_t val) { (void)port; (void)val; }
+static inline uint8_t inb(uint16_t port) { (void)port; return 0; }
+static inline void outw(uint16_t port, uint16_t val) { (void)port; (void)val; }
+static inline uint16_t inw(uint16_t port) { (void)port; return 0; }
+static inline void outl(uint16_t port, uint32_t val) { (void)port; (void)val; }
+static inline uint32_t inl(uint16_t port) { (void)port; return 0; }
+
+static inline void cli(void) {
+    uint32_t sr;
+    __asm__ volatile("mfc0 %0, $12" : "=r"(sr));
+    sr &= ~0x1u;
+    __asm__ volatile("mtc0 %0, $12" : : "r"(sr));
+}
+static inline void sti(void) {
+    uint32_t sr;
+    __asm__ volatile("mfc0 %0, $12" : "=r"(sr));
+    sr |= 0x1;
+    __asm__ volatile("mtc0 %0, $12" : : "r"(sr));
+}
+
+static inline void invlpg(uint64_t addr) {
+    (void)addr;
+    /* MIPS uses TLBWI/TLBWR for TLB management; xkphys is unmapped */
+}
+static inline void write_cr3(uint64_t val) {
+    (void)val;
+    /* MIPS64 xkphys mode doesn't use page tables for kernel */
+}
+static inline uint64_t read_cr3(void) {
+    return 0;
 }
 static inline void io_wait(void) { __asm__ volatile("nop"); }
 

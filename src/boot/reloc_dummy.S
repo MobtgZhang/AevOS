@@ -1,13 +1,11 @@
 /*
- * Minimal PE base relocation section for UEFI PE/COFF on architectures
- * without gnu-efi CRT support (LoongArch64, etc.).
+ * Minimal .reloc section stub for non-x86 PE/COFF EFI binaries.
  *
- * UEFI spec requires a valid .reloc data directory entry.
- * A single IMAGE_BASE_RELOCATION block with SizeOfBlock == 8 (header-only,
- * no fixup entries) tells the PE loader "nothing to relocate".  The block
- * must be 4-byte aligned and SizeOfBlock must be a multiple of 4.
+ * On x86_64 the gnu-efi CRT0 supplies this section.  For other
+ * architectures we provide a dummy relocation block so that
+ * objcopy produces a valid PE image with a BaseRelocationTable.
  */
 	.section .reloc, "a"
-	.balign 4
-	.long	0		/* VirtualAddress: page RVA */
-	.long	8		/* SizeOfBlock: header only, no entries */
+	.align 2
+	.long	0	/* VirtualAddress (dummy) */
+	.long	8	/* SizeOfBlock (header-only, zero relocations) */

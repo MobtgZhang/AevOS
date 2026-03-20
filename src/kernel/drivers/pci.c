@@ -119,6 +119,14 @@ static uint64_t decode_bar(uint8_t bus, uint8_t dev, uint8_t func, uint8_t bar_o
         addr |= (uint64_t)bar_hi << 32;
     }
 
+#if defined(__loongarch64)
+    if (addr)
+        addr += LOONGARCH_MMIO_BASE;
+#elif defined(__aarch64__)
+    if (addr)
+        addr += AARCH64_MMIO_BASE;
+#endif
+
     return addr;
 }
 
@@ -187,7 +195,13 @@ void pci_init(void)
     device_count = 0;
     klog("[pci] enumerating PCI buses...\n");
 
-    for (uint32_t bus = 0; bus < PCI_MAX_BUS; bus++) {
+#ifdef PCI_ECAM_BUS_LIMIT
+    uint32_t max_bus = PCI_ECAM_BUS_LIMIT;
+#else
+    uint32_t max_bus = PCI_MAX_BUS;
+#endif
+
+    for (uint32_t bus = 0; bus < max_bus; bus++) {
         for (uint8_t dev = 0; dev < PCI_MAX_DEV; dev++) {
             probe_device((uint8_t)bus, dev);
         }

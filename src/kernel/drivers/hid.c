@@ -1,8 +1,10 @@
 #include "hid.h"
+#include "serial.h"
 #include "../arch/io.h"
 #include "../klog.h"
+#include "../locale.h"
 
-/* ── PS/2 controller ports ── */
+/* ── PS/2 controller ports (x86 only) ── */
 
 #define PS2_DATA    0x60
 #define PS2_STATUS  0x64
@@ -28,18 +30,22 @@ static int32_t mouse_y = 0;
 static int32_t mouse_max_x = 1920;
 static int32_t mouse_max_y = 1080;
 static uint8_t mouse_buttons = 0;
+#if defined(__x86_64__)
 static uint8_t mouse_cycle = 0;
 static int8_t  mouse_bytes[3];
+#endif
 
 /* ── helpers ── */
 
 static void push_event(const input_event_t *ev)
 {
     uint32_t next = (eq_head + 1) % EVENT_QUEUE_SIZE;
-    if (next == eq_tail) return;  /* full – drop oldest would be alternative */
+    if (next == eq_tail) return;
     event_queue[eq_head] = *ev;
     eq_head = next;
 }
+
+#if defined(__x86_64__)
 
 static void ps2_wait_input(void)
 {
@@ -74,6 +80,8 @@ static uint8_t ps2_read_data(void)
     ps2_wait_output();
     return inb(PS2_DATA);
 }
+
+#endif /* __x86_64__ */
 
 /*
  * ── Scan code set 1 → keycode translation ──
@@ -133,6 +141,7 @@ static const keycode_t extended_table[128] = {
     [0x53] = KEY_DELETE,
 };
 
+#if defined(__x86_64__)
 static void update_modifiers(keycode_t kc, bool pressed)
 {
     uint16_t bit = 0;
@@ -152,12 +161,14 @@ static void update_modifiers(keycode_t kc, bool pressed)
     else         current_modifiers &= ~bit;
 }
 
-/* ── keyboard IRQ handler (IRQ1) ── */
-
 static bool     kb_extended = false;
+#endif
+
+/* ── keyboard IRQ handler (IRQ1, x86 PS/2) ── */
 
 void keyboard_handler(void)
 {
+#if defined(__x86_64__)
     uint8_t sc = inb(PS2_DATA);
 
     if (sc == 0xE0) {
@@ -192,12 +203,14 @@ void keyboard_handler(void)
     ev.modifiers      = current_modifiers;
     ev.button_changed = 0;
     push_event(&ev);
+#endif
 }
 
-/* ── mouse IRQ handler (IRQ12) ── */
+/* ── mouse IRQ handler (IRQ12, x86 PS/2) ── */
 
 void mouse_handler(void)
 {
+#if defined(__x86_64__)
     uint8_t data = inb(PS2_DATA);
 
     switch (mouse_cycle) {
@@ -285,53 +298,209 @@ void mouse_handler(void)
         break;
     }
     }
+#endif /* __x86_64__ */
 }
 
 /* ── initialization ── */
 
+#if defined(__x86_64__)
 static void mouse_init_ps2(void)
 {
-    /* Enable auxiliary device (mouse) */
     ps2_write_cmd(0xA8);
 
-    /* Enable interrupts on controller */
     ps2_write_cmd(0x20);
     uint8_t status = ps2_read_data();
-    status |= 0x02;  /* enable IRQ12 */
-    status &= ~0x20; /* enable mouse clock */
+    status |= 0x02;
+    status &= ~0x20;
     ps2_write_cmd(0x60);
     ps2_write_data(status);
 
-    /* Tell mouse to use default settings */
     ps2_write_cmd(0xD4);
     ps2_write_data(0xF6);
-    ps2_read_data();  /* ACK */
+    ps2_read_data();
 
-    /* Enable data reporting */
     ps2_write_cmd(0xD4);
     ps2_write_data(0xF4);
-    ps2_read_data();  /* ACK */
+    ps2_read_data();
 
     mouse_cycle = 0;
     mouse_x = 0;
     mouse_y = 0;
     mouse_buttons = 0;
 }
+#endif
 
 void hid_init(void)
 {
     eq_head = 0;
     eq_tail = 0;
     current_modifiers = 0;
-    kb_extended = false;
 
-    /* Flush the PS/2 buffer */
+#if defined(__x86_64__)
+    kb_extended = false;
     while (inb(PS2_STATUS) & PS2_STATUS_OUTPUT)
         inb(PS2_DATA);
-
     mouse_init_ps2();
-
     klog("[hid] PS/2 keyboard + mouse initialized\n");
+#else
+    klog("[hid] serial console keyboard enabled\n");
+#endif
+}
+
+/*
+ * Serial console → keycode mapping for VT100/xterm escape sequences.
+ * Provides keyboard input on platforms without PS/2 (LoongArch, RISC-V, AArch64).
+ */
+static keycode_t char_to_keycode(char c)
+{
+    if (c >= 'a' && c <= 'z') {
+        static const keycode_t alpha[] = {
+            KEY_A, KEY_B, KEY_C, KEY_D, KEY_E, KEY_F, KEY_G,
+            KEY_H, KEY_I, KEY_J, KEY_K, KEY_L, KEY_M, KEY_N,
+            KEY_O, KEY_P, KEY_Q, KEY_R, KEY_S, KEY_T,
+            KEY_U, KEY_V, KEY_W, KEY_X, KEY_Y, KEY_Z
+        };
+        return alpha[c - 'a'];
+    }
+    if (c >= 'A' && c <= 'Z')
+        return char_to_keycode((char)(c - 'A' + 'a'));
+
+    switch (c) {
+    case '0': return KEY_0;   case '1': return KEY_1;   case '2': return KEY_2;
+    case '3': return KEY_3;   case '4': return KEY_4;   case '5': return KEY_5;
+    case '6': return KEY_6;   case '7': return KEY_7;   case '8': return KEY_8;
+    case '9': return KEY_9;
+    case ' ':  return KEY_SPACE;
+    case '\r': case '\n': return KEY_ENTER;
+    case '\t': return KEY_TAB;
+    case 0x7F: case '\b': return KEY_BACKSPACE;
+    case 0x1B: return KEY_ESC;
+    case '-':  return KEY_MINUS;
+    case '=':  return KEY_EQUAL;
+    case '[':  return KEY_LBRACKET;
+    case ']':  return KEY_RBRACKET;
+    case '\\': return KEY_BACKSLASH;
+    case ';':  return KEY_SEMICOLON;
+    case '\'': return KEY_QUOTE;
+    case '`':  return KEY_BACKTICK;
+    case ',':  return KEY_COMMA;
+    case '.':  return KEY_DOT;
+    case '/':  return KEY_SLASH;
+    default:   return KEY_NONE;
+    }
+}
+
+static uint16_t modifiers_for_char(char c)
+{
+    if (c >= 'A' && c <= 'Z') return MOD_LSHIFT;
+    switch (c) {
+    case '!': case '@': case '#': case '$': case '%':
+    case '^': case '&': case '*': case '(': case ')':
+    case '_': case '+': case '{': case '}': case '|':
+    case ':': case '"': case '~': case '<': case '>':
+    case '?':
+        return MOD_LSHIFT;
+    default:
+        return 0;
+    }
+}
+
+void hid_poll_serial(void)
+{
+    int ch = serial_read();
+    if (ch < 0) return;
+
+    char c = (char)ch;
+
+    /* Handle VT100 escape sequences for arrow keys */
+    if (c == 0x1B) {
+        int c2 = serial_read();
+        if (c2 == '[') {
+            int c3 = serial_read();
+            keycode_t kc = KEY_NONE;
+            switch (c3) {
+            case 'A': kc = KEY_UP;    break;
+            case 'B': kc = KEY_DOWN;  break;
+            case 'C': kc = KEY_RIGHT; break;
+            case 'D': kc = KEY_LEFT;  break;
+            case 'H': kc = KEY_HOME;  break;
+            case 'F': kc = KEY_END;   break;
+            case '5': serial_read(); kc = KEY_PGUP;   break;
+            case '6': serial_read(); kc = KEY_PGDN;   break;
+            case '2': serial_read(); kc = KEY_INSERT;  break;
+            case '3': serial_read(); kc = KEY_DELETE;  break;
+            default: break;
+            }
+            if (kc != KEY_NONE) {
+                input_event_t ev = {0};
+                ev.type      = INPUT_KEY_PRESS;
+                ev.keycode   = kc;
+                ev.modifiers = current_modifiers;
+                ev.mouse_x   = mouse_x;
+                ev.mouse_y   = mouse_y;
+                push_event(&ev);
+                ev.type = INPUT_KEY_RELEASE;
+                push_event(&ev);
+            }
+            return;
+        }
+        if (c2 >= 0) {
+            /* ESC followed by something else (Alt+key) */
+            c = (char)c2;
+            current_modifiers |= MOD_LALT;
+        } else {
+            /* Plain ESC */
+            input_event_t ev = {0};
+            ev.type      = INPUT_KEY_PRESS;
+            ev.keycode   = KEY_ESC;
+            ev.modifiers = current_modifiers;
+            ev.mouse_x   = mouse_x;
+            ev.mouse_y   = mouse_y;
+            push_event(&ev);
+            ev.type = INPUT_KEY_RELEASE;
+            push_event(&ev);
+            return;
+        }
+    }
+
+    /* Ctrl+A through Ctrl+Z (0x01-0x1A) */
+    if (c >= 1 && c <= 26 && c != '\r' && c != '\n' && c != '\t' && c != '\b') {
+        keycode_t kc = char_to_keycode((char)('a' + c - 1));
+        if (kc != KEY_NONE) {
+            input_event_t ev = {0};
+            ev.type      = INPUT_KEY_PRESS;
+            ev.keycode   = kc;
+            ev.modifiers = current_modifiers | MOD_LCTRL;
+            ev.mouse_x   = mouse_x;
+            ev.mouse_y   = mouse_y;
+            push_event(&ev);
+            ev.type = INPUT_KEY_RELEASE;
+            push_event(&ev);
+        }
+        current_modifiers &= ~MOD_LALT;
+        return;
+    }
+
+    keycode_t kc = char_to_keycode(c);
+    if (kc == KEY_NONE) {
+        current_modifiers &= ~MOD_LALT;
+        return;
+    }
+
+    uint16_t mods = current_modifiers | modifiers_for_char(c);
+
+    input_event_t ev = {0};
+    ev.type      = INPUT_KEY_PRESS;
+    ev.keycode   = kc;
+    ev.modifiers = mods;
+    ev.mouse_x   = mouse_x;
+    ev.mouse_y   = mouse_y;
+    push_event(&ev);
+
+    ev.type = INPUT_KEY_RELEASE;
+    push_event(&ev);
+
+    current_modifiers &= ~MOD_LALT;
 }
 
 /* ── event polling ── */

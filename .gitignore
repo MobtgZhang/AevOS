@@ -53,3 +53,10 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Node / Vite (cursor-workbench)
+devtools/cursor-workbench/node_modules/
+devtools/cursor-workbench/dist/
+
+# QEMU UEFI images (make fetch-uefi-firmware → AEVOS_UEFI_FW)
+firmware/uefi/

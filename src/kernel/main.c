@@ -14,10 +14,14 @@
 #include "drivers/hid.h"
 #include "drivers/pci.h"
 #include "drivers/nvme.h"
+#include "drivers/block_dev.h"
+#include "drivers/ahci.h"
 #include "drivers/audio.h"
 #include "drivers/virtio_gpu.h"
 #include "locale.h"
 #include "fs/vfs.h"
+#include "fs/storage_automount.h"
+#include <posix/unistd.h>
 #include "sched/coroutine.h"
 #include "../llm/llm_runtime.h"
 #include "../agent/agent_core.h"
@@ -132,6 +136,14 @@ void NORETURN kernel_main(boot_info_t *bi)
     else
         klog("[nvme] No NVMe controllers found\n");
 
+#if defined(__x86_64__)
+    klog("[ahci] probing SATA (AHCI)\n");
+    if (ahci_init())
+        klog("[ahci] SATA port ready\n");
+    else
+        klog("[ahci] No AHCI disk or init failed\n");
+#endif
+
     klog("[snd] audio probe\n");
     if (hda_init())
         klog("[snd]  HD Audio device initialized\n");
@@ -227,6 +239,12 @@ void NORETURN kernel_main(boot_info_t *bi)
 
     klog("[vfs] VFS init\n");
     vfs_init();
+
+    block_storage_register_default();
+    storage_automount_all();
+
+    klog("[posix] POSIX.1-style I/O layer (errno, open/read/write/stat, …)\n");
+    posix_init();
 
     klog("[sched] coroutine scheduler init\n");
     coro_init();

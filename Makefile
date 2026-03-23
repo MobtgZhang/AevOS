@@ -204,6 +204,7 @@ KERNEL_NET   := $(KERNEL_DIR)/net
 AGENT_DIR    := $(SRCDIR)/agent
 LLM_DIR      := $(SRCDIR)/llm
 UI_DIR       := $(SRCDIR)/ui
+POSIX_DIR    := $(SRCDIR)/posix
 LIB_DIR      := $(SRCDIR)/lib
 DB_DIR       := $(SRCDIR)/db
 TOOLS_DIR    := $(SRCDIR)/tools
@@ -239,6 +240,7 @@ KERNEL_CSRC := $(wildcard $(KERNEL_DIR)/*.c) \
                $(wildcard $(AGENT_DIR)/*.c) \
                $(wildcard $(LLM_DIR)/*.c) \
                $(wildcard $(UI_DIR)/*.c) \
+               $(wildcard $(POSIX_DIR)/*.c) \
                $(wildcard $(LIB_DIR)/*.c) \
                $(wildcard $(DB_DIR)/*.c)
 
@@ -356,6 +358,7 @@ dirs:
 	@mkdir -p $(BUILD_DIR)/$(AGENT_DIR)
 	@mkdir -p $(BUILD_DIR)/$(LLM_DIR)
 	@mkdir -p $(BUILD_DIR)/$(UI_DIR)
+	@mkdir -p $(BUILD_DIR)/$(POSIX_DIR)
 	@mkdir -p $(BUILD_DIR)/$(LIB_DIR)
 	@mkdir -p $(BUILD_DIR)/$(DB_DIR)
 	@mkdir -p $(BUILD_DIR)/$(TOOLS_DIR)

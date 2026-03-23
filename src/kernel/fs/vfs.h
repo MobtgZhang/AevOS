@@ -49,6 +49,8 @@ struct vfs_ops {
     int     (*mkdir)(vfs_node_t *parent, const char *name);
     int     (*unlink)(vfs_node_t *parent, const char *name);
     int     (*stat)(vfs_node_t *node, vfs_stat_t *st);
+    /* Optional: resolve a child name not yet in the in-memory tree (disk fs). */
+    vfs_node_t *(*lookup)(vfs_node_t *parent, const char *name);
 };
 
 struct vfs_node {
@@ -77,4 +79,12 @@ ssize_t       vfs_write(vfs_fd_t fd, const void *buf, size_t size);
 int           vfs_mkdir(const char *path);
 int           vfs_readdir(vfs_fd_t fd, vfs_dirent_t *entries, size_t max_entries);
 int           vfs_stat(const char *path, vfs_stat_t *st);
+int           vfs_fstat(vfs_fd_t fd, vfs_stat_t *st);
+int64_t       vfs_lseek(vfs_fd_t fd, int64_t offset, int whence);
 vfs_node_t   *vfs_resolve_path(const char *path);
+vfs_node_t   *vfs_make_child(vfs_node_t *parent, const char *name,
+                             vfs_node_type_t type, void *fs_data);
+
+#define VFS_SEEK_SET 0
+#define VFS_SEEK_CUR 1
+#define VFS_SEEK_END 2

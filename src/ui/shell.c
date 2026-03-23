@@ -83,10 +83,12 @@ void shell_init(ui_shell_t *shell, fb_ctx_t *fb, agent_t *agent)
         " - Autonomous Evolving OS. "
         "I am your AI assistant. How can I help you today?");
 
-    klog("[ui] layout ok (%ux%u)\n", fb->width, fb->height);
+    aevos_wl_compositor_init(&shell->compositor, shell);
+
+    klog("[ui] layout ok (%ux%u) [wl-style compositor]\n", fb->width, fb->height);
 }
 
-static void shell_render_titlebar(ui_shell_t *shell)
+void shell_layer_titlebar(ui_shell_t *shell)
 {
     fb_ctx_t *fb = shell->fb;
     const font_t *fnt = font_get_default();
@@ -110,7 +112,7 @@ static void shell_render_titlebar(ui_shell_t *shell)
     font_draw_string(fb, mx, ty, min_btn, COLOR_YELLOW, 0, fnt);
 }
 
-static void shell_render_statusbar(ui_shell_t *shell)
+void shell_layer_statusbar(ui_shell_t *shell)
 {
     fb_ctx_t *fb = shell->fb;
     const font_t *fnt = font_get_default();
@@ -166,29 +168,7 @@ void shell_render(ui_shell_t *shell)
     if (!shell || !shell->fb)
         return;
 
-    fb_clear(COLOR_BG);
-
-    shell_render_titlebar(shell);
-
-    if (shell->show_sidebar) {
-        sidebar_render(&shell->sidebar, shell->fb);
-    }
-
-    chat_view_render(&shell->chat, shell->fb);
-
-    if (shell->show_terminal) {
-        terminal_render(&shell->terminal, shell->fb);
-    }
-
-    shell_render_statusbar(shell);
-
-    if (shell->mouse_visible) {
-        fb_draw_cursor(shell->mouse_x, shell->mouse_y, 0xFFFFFFFF);
-    }
-
-    fb_swap_buffers();
-    shell->frame_count++;
-    shell->needs_redraw = false;
+    aevos_wl_compositor_present(&shell->compositor);
 }
 
 static bool shell_is_mouse_event(input_event_type_t type)

@@ -57,11 +57,27 @@ static vfs_node_t *find_child(vfs_node_t *parent, const char *name)
     return NULL;
 }
 
+/* ── Get effective ops for a node (check mount overlay) ───────────── */
+
+static vfs_ops_t *get_ops(vfs_node_t *node)
+{
+    if (node->mount_ops) return node->mount_ops;
+    if (node->ops)       return node->ops;
+    vfs_node_t *p = node->parent;
+    while (p) {
+        if (p->mount_ops) return p->mount_ops;
+        if (p->ops)       return p->ops;
+        p = p->parent;
+    }
+    return NULL;
+}
+
 /*
  * Split a path into components and walk the tree.
+ * Caller must hold vfs_lock when the tree may be mutated (lookup).
  * E.g. "/usr/lib/foo" → "usr", "lib", "foo"
  */
-vfs_node_t *vfs_resolve_path(const char *path)
+static vfs_node_t *vfs_walk_path(const char *path)
 {
     if (!path || *path != '/')
         return NULL;
@@ -89,26 +105,36 @@ vfs_node_t *vfs_resolve_path(const char *path)
         }
 
         vfs_node_t *child = find_child(cur, component);
+        if (!child) {
+            vfs_ops_t *pop = get_ops(cur);
+            if (pop && pop->lookup)
+                child = pop->lookup(cur, component);
+        }
         if (!child) return NULL;
         cur = child;
     }
     return cur;
 }
 
-/* ── Get effective ops for a node (check mount overlay) ───────────── */
-
-static vfs_ops_t *get_ops(vfs_node_t *node)
+vfs_node_t *vfs_resolve_path(const char *path)
 {
-    if (node->mount_ops) return node->mount_ops;
-    if (node->ops)       return node->ops;
-    /* walk up to find mounted ancestor */
-    vfs_node_t *p = node->parent;
-    while (p) {
-        if (p->mount_ops) return p->mount_ops;
-        if (p->ops)       return p->ops;
-        p = p->parent;
-    }
-    return NULL;
+    spin_lock(&vfs_lock);
+    vfs_node_t *n = vfs_walk_path(path);
+    spin_unlock(&vfs_lock);
+    return n;
+}
+
+vfs_node_t *vfs_make_child(vfs_node_t *parent, const char *name,
+                           vfs_node_type_t type, void *fs_data)
+{
+    if (!parent || !name || !*name)
+        return NULL;
+    vfs_node_t *n = create_node(name, type);
+    if (!n)
+        return NULL;
+    n->fs_data = fs_data;
+    add_child(parent, n);
+    return n;
 }
 
 /* ── Public API ───────────────────────────────────────────────────── */
@@ -135,7 +161,7 @@ int vfs_mount(const char *path, vfs_ops_t *fs_ops, void *fs_data)
     if (strcmp(path, "/") == 0) {
         mount_point = vfs_root;
     } else {
-        mount_point = vfs_resolve_path(path);
+        mount_point = vfs_walk_path(path);
         if (!mount_point) {
             /* create intermediate dirs */
             vfs_node_t *cur = vfs_root;
@@ -174,7 +200,7 @@ vfs_fd_t vfs_open(const char *path, uint32_t flags)
 {
     spin_lock(&vfs_lock);
 
-    vfs_node_t *node = vfs_resolve_path(path);
+    vfs_node_t *node = vfs_walk_path(path);
     if (!node && (flags & VFS_O_CREATE)) {
         /* find parent and create file */
         char parent_path[VFS_PATH_MAX];
@@ -202,7 +228,7 @@ vfs_fd_t vfs_open(const char *path, uint32_t flags)
             strncpy(filename, last_slash + 1, VFS_NAME_MAX - 1);
             filename[VFS_NAME_MAX - 1] = '\0';
 
-            vfs_node_t *parent = vfs_resolve_path(parent_path);
+            vfs_node_t *parent = vfs_walk_path(parent_path);
             if (!parent || parent->type != VFS_DIR) {
                 spin_unlock(&vfs_lock);
                 return -ENOENT;
@@ -243,7 +269,7 @@ vfs_fd_t vfs_open(const char *path, uint32_t flags)
 int vfs_close(vfs_fd_t fd)
 {
     if (fd < 0 || fd >= MAX_OPEN_FILES || !fd_table[fd].in_use)
-        return -EINVAL;
+        return -EBADF;
 
     spin_lock(&vfs_lock);
 
@@ -264,7 +290,7 @@ int vfs_close(vfs_fd_t fd)
 ssize_t vfs_read(vfs_fd_t fd, void *buf, size_t size)
 {
     if (fd < 0 || fd >= MAX_OPEN_FILES || !fd_table[fd].in_use)
-        return -EINVAL;
+        return -EBADF;
     if (!buf || size == 0)
         return -EINVAL;
 
@@ -282,7 +308,7 @@ ssize_t vfs_read(vfs_fd_t fd, void *buf, size_t size)
 ssize_t vfs_write(vfs_fd_t fd, const void *buf, size_t size)
 {
     if (fd < 0 || fd >= MAX_OPEN_FILES || !fd_table[fd].in_use)
-        return -EINVAL;
+        return -EBADF;
     if (!buf || size == 0)
         return -EINVAL;
 
@@ -310,7 +336,7 @@ int vfs_mkdir(const char *path)
     spin_lock(&vfs_lock);
 
     /* check if already exists */
-    vfs_node_t *existing = vfs_resolve_path(path);
+    vfs_node_t *existing = vfs_walk_path(path);
     if (existing) {
         spin_unlock(&vfs_lock);
         return -EEXIST;
@@ -332,7 +358,7 @@ int vfs_mkdir(const char *path)
     } else {
         *last_slash = '\0';
         strncpy(dirname, last_slash + 1, VFS_NAME_MAX - 1);
-        parent = vfs_resolve_path(parent_path);
+        parent = vfs_walk_path(parent_path);
     }
     dirname[VFS_NAME_MAX - 1] = '\0';
 
@@ -360,7 +386,7 @@ int vfs_mkdir(const char *path)
 int vfs_readdir(vfs_fd_t fd, vfs_dirent_t *entries, size_t max_entries)
 {
     if (fd < 0 || fd >= MAX_OPEN_FILES || !fd_table[fd].in_use)
-        return -EINVAL;
+        return -EBADF;
     if (!entries || max_entries == 0)
         return -EINVAL;
 
@@ -389,12 +415,19 @@ int vfs_stat(const char *path, vfs_stat_t *st)
 {
     if (!path || !st) return -EINVAL;
 
-    vfs_node_t *node = vfs_resolve_path(path);
-    if (!node) return -ENOENT;
+    spin_lock(&vfs_lock);
+    vfs_node_t *node = vfs_walk_path(path);
+    if (!node) {
+        spin_unlock(&vfs_lock);
+        return -ENOENT;
+    }
 
     vfs_ops_t *ops = get_ops(node);
-    if (ops && ops->stat)
-        return ops->stat(node, st);
+    if (ops && ops->stat) {
+        int rc = ops->stat(node, st);
+        spin_unlock(&vfs_lock);
+        return rc;
+    }
 
     st->type        = node->type;
     st->size        = node->size;
@@ -402,5 +435,71 @@ int vfs_stat(const char *path, vfs_stat_t *st)
     st->inode       = node->inode;
     st->created     = 0;
     st->modified    = 0;
+    spin_unlock(&vfs_lock);
     return 0;
+}
+
+int vfs_fstat(vfs_fd_t fd, vfs_stat_t *st)
+{
+    if (!st)
+        return -EINVAL;
+
+    spin_lock(&vfs_lock);
+
+    if (fd < 0 || fd >= MAX_OPEN_FILES || !fd_table[fd].in_use) {
+        spin_unlock(&vfs_lock);
+        return -EBADF;
+    }
+
+    vfs_node_t *node = fd_table[fd].node;
+    vfs_ops_t  *ops  = get_ops(node);
+    if (ops && ops->stat) {
+        int rc = ops->stat(node, st);
+        spin_unlock(&vfs_lock);
+        return rc;
+    }
+
+    st->type        = node->type;
+    st->size        = node->size;
+    st->permissions = node->permissions;
+    st->inode       = node->inode;
+    st->created     = 0;
+    st->modified    = 0;
+
+    spin_unlock(&vfs_lock);
+    return 0;
+}
+
+int64_t vfs_lseek(vfs_fd_t fd, int64_t offset, int whence)
+{
+    spin_lock(&vfs_lock);
+
+    if (fd < 0 || fd >= MAX_OPEN_FILES || !fd_table[fd].in_use) {
+        spin_unlock(&vfs_lock);
+        return -EBADF;
+    }
+
+    vfs_node_t *node = fd_table[fd].node;
+    int64_t     cur  = (int64_t)fd_table[fd].offset;
+    int64_t     new_off;
+
+    if (whence == VFS_SEEK_SET)
+        new_off = offset;
+    else if (whence == VFS_SEEK_CUR)
+        new_off = cur + offset;
+    else if (whence == VFS_SEEK_END)
+        new_off = (int64_t)node->size + offset;
+    else {
+        spin_unlock(&vfs_lock);
+        return -EINVAL;
+    }
+
+    if (new_off < 0) {
+        spin_unlock(&vfs_lock);
+        return -EINVAL;
+    }
+
+    fd_table[fd].offset = (uint64_t)new_off;
+    spin_unlock(&vfs_lock);
+    return new_off;
 }

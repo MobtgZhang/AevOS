@@ -11,6 +11,15 @@ typedef struct input_event input_event_t;
 #define TERM_INPUT_LEN     512
 #define TERM_HISTORY_COUNT 64
 #define TERM_HISTORY_LEN   256
+#define TERM_MAX_ENV       16
+#define TERM_ENV_KEY_LEN   40
+#define TERM_ENV_VAL_LEN   128
+#define TERM_CWD_LEN       256
+
+typedef struct {
+    char key[TERM_ENV_KEY_LEN];
+    char val[TERM_ENV_VAL_LEN];
+} terminal_env_entry_t;
 
 typedef struct {
     char     text[TERM_LINE_LEN];
@@ -31,6 +40,9 @@ typedef struct {
     int             history_count;
     int             history_index;
     uint32_t        blink_counter;
+    char            cwd[TERM_CWD_LEN];
+    terminal_env_entry_t env[TERM_MAX_ENV];
+    int             env_count;
 } terminal_t;
 
 void terminal_init(terminal_t *term, rect_t bounds);

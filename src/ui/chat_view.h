@@ -38,6 +38,8 @@ void chat_view_init(chat_view_t *cv, rect_t bounds);
 void chat_view_add_message(chat_view_t *cv, chat_role_t role,
                            const char *text);
 void chat_view_update_streaming(chat_view_t *cv, const char *text);
+/* Append a token/chunk to the last assistant message (streaming UI). */
+void chat_view_append_stream_chunk(chat_view_t *cv, const char *chunk);
 void chat_view_render(chat_view_t *cv, fb_ctx_t *fb);
 bool chat_view_handle_input(chat_view_t *cv, input_event_t *ev);
 void chat_view_render_input_box(chat_view_t *cv, fb_ctx_t *fb);

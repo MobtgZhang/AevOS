@@ -5,7 +5,9 @@
 #include "../kernel/arch/arch.h"
 #include "../kernel/drivers/gpu_fb.h"
 #include "../kernel/drivers/hid.h"
+#include "../kernel/net/lwip_port.h"
 #include "../kernel/klog.h"
+#include "ws_bridge.h"
 #include "../agent/agent_core.h"
 #include "../lib/string.h"
 #include <aevos/config.h>
@@ -84,6 +86,7 @@ void shell_init(ui_shell_t *shell, fb_ctx_t *fb, agent_t *agent)
         "I am your AI assistant. How can I help you today?");
 
     aevos_wl_compositor_init(&shell->compositor, shell);
+    ui_ws_init();
 
     klog("[ui] layout ok (%ux%u) [wl-style compositor]\n", fb->width, fb->height);
 }
@@ -358,6 +361,8 @@ void shell_main_loop(ui_shell_t *shell)
 
     for (;;) {
         hid_poll_serial();
+        net_poll();
+        ui_ws_poll();
 
         input_event_t ev;
         while (input_poll(&ev)) {

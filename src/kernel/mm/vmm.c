@@ -1,5 +1,6 @@
 #include "vmm.h"
 #include "pmm.h"
+#include "../drivers/pci.h"
 #include "../arch/io.h"
 #include "../lib/string.h"
 
@@ -237,6 +238,18 @@ void vmm_init(boot_info_t *bi) {
 #endif
 #else
     map_huge_range(&kernel_ctx, PHYS_MAP_BASE, 0, map_size, flags);
+#if defined(__x86_64__)
+    /*
+     * QEMU / PC 固件常把 64-bit PCI BAR（virtio 1.0 modern）放在物理地址 ≥4G
+     *（例如 0xC000000000）。低 4G 身份映射访问不到，必须在 PHYS_MAP_BASE
+     * 下映射一片高 MMIO 窗口（与 pci_bar_to_mmio_vaddr 一致）。
+     */
+    map_huge_range(&kernel_ctx,
+                   PHYS_MAP_BASE + AEVOS_X86_PCI_MMIO64_PHYS_LO,
+                   AEVOS_X86_PCI_MMIO64_PHYS_LO,
+                   AEVOS_X86_PCI_MMIO64_PHYS_SZ,
+                   flags | PTE_NO_CACHE);
+#endif
 #endif
 
     /* Map framebuffer at FRAMEBUFFER_VBASE (boot_info may be packed) */

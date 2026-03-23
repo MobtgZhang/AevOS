@@ -1,4 +1,8 @@
 #include "memory.h"
+/*
+ * HNSW graph nodes and mem_entry_t rows use kmalloc/kcalloc (kernel slab);
+ * optional mmap/SQLite cold tier is planned for L3 HMS cache.
+ */
 #include "kernel/mm/slab.h"
 #include "kernel/klog.h"
 #include "kernel/drivers/timer.h"

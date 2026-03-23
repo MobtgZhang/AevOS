@@ -6,6 +6,8 @@
 #include "memory.h"
 #include "skill.h"
 #include "evolution.h"
+#include "mailbox.h"
+#include "hms_cache.h"
 
 struct llm_ctx;
 
@@ -16,16 +18,27 @@ typedef enum {
     AGENT_EVOLVING  = 3,
 } agent_state_t;
 
+/* Neoclaw-style tool scheduling (orthogonal to agent_state_t). */
+typedef enum {
+    AGENT_TOOL_READY = 0,
+    AGENT_TOOL_WAIT_IO,
+    AGENT_TOOL_WAIT_LLM,
+    AGENT_TOOL_DETACH,
+} agent_tool_state_t;
+
 typedef struct agent {
     history_t         history;
     memory_engine_t   memory;
     skill_engine_t    skills;
+    hms_cache_t       hms;
     struct llm_ctx   *llm;
     void             *main_coro;
     char              name[64];
     uint64_t          created_at;
     uint64_t          id;
     agent_state_t     state;
+    agent_tool_state_t tool_state;
+    bool              cancel_req;
     evolution_state_t evolution;
     char             *response_buf;
     size_t            response_buf_size;
@@ -36,6 +49,7 @@ typedef struct {
     uint32_t   count;
     uint32_t   active_agent;
     uint64_t   next_id;
+    mailbox_t mailbox;
     spinlock_t lock;
 } agent_system_t;
 
@@ -50,6 +64,8 @@ void        agent_set_active(agent_system_t *sys, uint64_t agent_id);
 agent_t    *agent_get_active(agent_system_t *sys);
 
 void agent_tick(agent_t *agent);
+
+void agent_cancel_request(agent_t *agent);
 
 int agent_save_state(agent_t *agent, const char *path);
 int agent_load_state(agent_t *agent, const char *path);

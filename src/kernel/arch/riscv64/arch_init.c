@@ -3,6 +3,7 @@
  */
 #include <aevos/types.h>
 #include "../arch.h"
+#include "../../klog.h"
 
 void arch_early_init(void)  { }
 void arch_enable_irq(void)  { __asm__ volatile("csrsi mstatus, 8"); }
@@ -20,5 +21,5 @@ void idt_init(void)
 
 void pic_init(void)
 {
-    /* RISC-V uses PLIC (Platform-Level Interrupt Controller), stub for now */
+    klog("[pic] riscv64: PLIC init deferred (virt timer/PLIC MMIO TBD)\n");
 }

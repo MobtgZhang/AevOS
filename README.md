@@ -15,81 +15,76 @@ The framebuffer shell (dark theme, sidebar, AI chat, terminal, and status bar):
 
 - [English](docs/en/README.md) — features, build, run, and boot configuration
 - [简体中文](docs/zh/README.md) — 同上（中文）
+- Topic pages: [architecture](docs/en/architecture.md) · [HMS](docs/en/hms.md) · [LC layer](docs/en/container.md) · [evolution](docs/en/evolution.md) · [LLM syscall](docs/en/llm-syscall.md) (and `docs/zh/` counterparts)
 
-## Architecture
+## Architecture (AevOS-Evo roadmap)
 
 ```
-┌──────────────────────────────────────────────────────┐
-│  Layer 4 — AevOS Shell (Cursor-style framebuffer UI) │
-├──────────────────────────────────────────────────────┤
-│  Layer 3 — AI Agent Core (History / Memory / Skills) │
-├──────────────────────────────────────────────────────┤
-│  Layer 2 — LLM Runtime (GGUF, Q4/Q8, SIMD inference)│
-├──────────────────────────────────────────────────────┤
-│  Layer 1 — Micro-kernel (PMM, VMM, coroutines, VFS) │
-├──────────────────────────────────────────────────────┤
-│  Layer 0 — UEFI Boot Loader (aevos_boot.efi)        │
-└──────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│  L6 — Shell (Cursor-like UI, Wayland-style compositor API) │
+├────────────────────────────────────────────────────────────┤
+│  L5 — Self-Evolution (Planner / Corrector / Verifier / Evolver) │
+├────────────────────────────────────────────────────────────┤
+│  L4 — Agent Runtime (EventLog, mailbox, tool states, cancel) │
+├────────────────────────────────────────────────────────────┤
+│  L3 — HMS (History / Memory / Skills + L1–L3 semantic cache) │
+├────────────────────────────────────────────────────────────┤
+│  LC — Container layer (sandbox, OCI/Linux ABI — in progress) │
+├────────────────────────────────────────────────────────────┤
+│  L2 — LLM Runtime (local GGUF + optional remote API syscall) │
+├────────────────────────────────────────────────────────────┤
+│  L1 — Micro-kernel (PMM, VMM, coroutines, VFS, net, virtio-net) │
+├────────────────────────────────────────────────────────────┤
+│  L0 — UEFI boot (boot.json, kernel.elf, GOP)                 │
+└────────────────────────────────────────────────────────────┘
 ```
 
-**Layer 0** — UEFI bootloader reads `boot.json`, loads `kernel.elf`, initializes
-the GOP framebuffer, and jumps to the kernel.
+**L0** — UEFI bootloader reads `\EFI\AevOS\boot.json` when present (falls back to
+defaults), loads `kernel.elf`, initializes GOP, passes `boot_info_t` to the kernel.
 
-**Layer 1** — Freestanding C17 micro-kernel. Physical/virtual memory management
-with 4-level page tables, coroutine-based cooperative scheduler, NVMe/HID/GPU
-drivers, a simple VFS, and network stack.
+**L1** — C17 micro-kernel: PMM/VMM/slab, cooperative coroutines, drivers (NVMe,
+AHCI on x86_64, virtio-GPU, virtio-net, HID, …), VFS with `/proc` and `/dev`, and
+an in-kernel IPv4 stack.
 
-**Layer 2** — LLM inference engine running quantized GGUF models. Used by
-the Agent layer for system-call–level LLM inference. Supports Q4_K_M and Q8
-quantization, AVX2 SIMD acceleration, and streaming token output.
+**L2** — GGUF inference plus `llm_sys_*` syscall-style API; remote OpenAI-compatible
+path is stubbed until HTTP/TLS on top of the stack is complete.
 
-**Layer 3** — The AI Agent core. Each agent has a conversation history (multiple
-sessions sorted by time, backed by SQLite3), a vector memory engine (HNSW index
-for semantic recall), and a skill engine that can generate, compile, and
-hot-load new C functions at runtime.
+**L3** — Agent HMS: ring-buffer history (B+/WAL index planned), HNSW memory,
+skills; `hms_cache` provides an L1 CLOCK-style hot cache.
 
-**Layer 4** — Framebuffer-based UI with a dark theme. Sidebar file browser,
-AI chat panel with streaming output, built-in terminal, mouse cursor support
-(movement, left/right click), keyboard driver, and status bar.
+**LC** — Container compatibility (skill sandbox, IFC, Linux syscall shim, OCI):
+scaffold modules under `src/container/`.
+
+**L4** — Append-only `EventLog`, MPMC `mailbox`, Neoclaw-style tool states, scheduler
+cancel broadcast hook.
+
+**L5** — Evolution plane scaffold under `src/evolution/`.
+
+**L6** — Framebuffer shell with streaming chat helpers and internal Wayland-like
+protocol (`aevos_wl_*`) for compositor-style layout.
 
 ## Directory Layout
 
 ```
 src/
-├── boot/               UEFI bootloader (aevos_boot.efi)
-│   ├── efi_main.c      EFI entry point
-│   ├── efi_types.h     UEFI type definitions
-│   └── linker_boot.lds Bootloader linker script
-├── kernel/             Micro-kernel
-│   ├── main.c          kernel_main() entry
-│   ├── arch/           Multi-arch support (x86_64, aarch64, riscv64, loongarch64)
-│   ├── mm/             PMM, VMM, slab allocator
-│   ├── sched/          Coroutine scheduler, context switch
-│   ├── drivers/        NVMe, GPU framebuffer, HID (keyboard+mouse), audio, serial, timer, PCI
-│   ├── fs/             VFS, AevOSFS
-│   └── net/            Network stack
-├── agent/              AI Agent Core
-├── llm/                LLM inference runtime
-├── db/                 Database layer (SQLite3-backed History / Memory / Skills)
-├── ui/                 Framebuffer UI shell
-├── lib/                Freestanding libc subset
-├── tools/              Host utilities (mkfs_aevos, skill_packager)
-├── include/aevos/      Shared headers
-│   ├── types.h         Primitive types
-│   ├── boot_info.h     Boot information structures
-│   └── config.h        Compile-time constants
-└── build/              Build artifacts
-
-third_party/
-└── sqlite3/            SQLite3 amalgamation (git submodule)
+├── boot/               UEFI bootloader
+├── kernel/             Micro-kernel (arch, mm, sched, drivers, fs, net)
+├── agent/              Agent core, eventlog, mailbox, hms_cache, history_wal, …
+├── llm/                LLM runtime, llm_syscall, llm_api_client (remote stub)
+├── db/                 aevos_db (in-memory; optional SQLite via third_party)
+├── container/          LC layer (sandbox, ifc, linux_subsys, oci)
+├── evolution/          L5 scaffold (planner, corrector, verifier, evolver)
+├── ui/                 Shell, terminal, chat, ws_bridge stub, wl protocol
+├── posix/, lib/, tools/, include/aevos/
+third_party/sqlite3/    Drop sqlite amalgamation here when enabling on-disk DB
 ```
 
 ## Prerequisites
 
-- **GCC cross-compiler**: `x86_64-elf-gcc` (or host `gcc` as fallback)
-- **GNU-EFI**: UEFI development headers and libraries
-- **mtools**: For building FAT32 disk images
-- **QEMU + OVMF**: For testing in a virtual machine
+- **GCC cross-compiler**: e.g. `x86_64-elf-gcc` (see `Makefile` fallbacks)
+- **GNU-EFI**: UEFI bootloader
+- **mtools**: FAT32 images
+- **QEMU + firmware** (OVMF / AAVMF / EDK2 per architecture)
 
 ### Install on Ubuntu/Debian
 
@@ -100,71 +95,37 @@ sudo apt install gcc gnu-efi mtools qemu-system-x86 ovmf
 ## Building
 
 ```bash
-# Build everything (bootloader + kernel + disk image)
 make
-
-# Build for a specific architecture
 make ARCH=aarch64
 make ARCH=riscv64
 make ARCH=loongarch64
-
-# Build individual components
-make boot       # UEFI bootloader only
-make kernel     # Kernel only
-make tools      # Host tools only
-make image      # Disk image
-
-# Show build info
+make ARCH=mips64el
+make boot / kernel / image / tools
 make info
 ```
 
 ## Running
 
 ```bash
-# Launch in QEMU with UEFI firmware (current ARCH, default x86_64)
 make run
 ```
 
-This starts QEMU with OVMF (x86_64) or EDK2 pflash (LoongArch), 4 GB RAM, and the
-generated disk image. Serial output is on stdio.
-
-**LoongArch 64** needs a LoongArch cross GCC (`loongarch64-linux-gnu-gcc` or
-similar). Firmware defaults to `AEVOS_LOONGARCH_FW` (see `Makefile`), e.g.
-`~/Firmware/LoongArchVirtMachine/QEMU_EFI.fd` and `QEMU_VARS.fd`. Override:
-
-```bash
-AEVOS_LOONGARCH_FW=/path/to/LoongArchVirtMachine make ARCH=loongarch64 run
-```
+QEMU is started with a **virtio-net-pci** NIC on `user` networking where the
+platform supports PCI (see `Makefile`). **mips64el** uses direct `-kernel` boot
+without UEFI by default.
 
 ## Boot Configuration
 
-Place a `boot.json` file in the EFI system partition at `\EFI\AevOS\boot.json`:
-
-```json
-{
-  "model_path": "/models/qwen-7b-q4.gguf",
-  "n_ctx": 32768,
-  "n_threads": 4,
-  "use_gpu": false,
-  "target_fps": 60,
-  "screen_width": 1920,
-  "screen_height": 1080
-}
-```
-
-If the file is missing, sensible defaults are used.
+`boot.json` on the ESP at `\EFI\AevOS\boot.json` (see example in
+[docs/zh/README.md](docs/zh/README.md)).
 
 ## Version History
 
-| Version | Milestone                                                  |
-|---------|------------------------------------------------------------|
-| v0.1.0  | Release baseline: versioned headers, slab up to 64 KiB (UI coroutine stacks), log tags |
-| v0.1    | Manual skill registration, LLM tool calls                  |
-| v0.2    | Semi-auto skill extraction from conversation history       |
-| v0.3    | Full auto: LLM generates C → TinyCC → sandbox → deploy    |
-| v0.4    | Skill evaluation & retirement (success rate < 60% → regen) |
-| v0.5    | Mouse cursor support, enhanced drivers, multi-arch builds  |
+| Version | Milestone |
+|---------|-----------|
+| v0.1.0+ | Evo roadmap: virtio-net, procfs/devfs, EventLog, llm_syscall, LC/L5 scaffolds |
+| v0.1.0  | Baseline headers, slab 64 KiB, klog tags |
 
 ## License
 
-LGPL-2.1 license.
+LGPL-2.1.

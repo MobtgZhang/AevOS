@@ -484,6 +484,195 @@ static mmap_type_t efi_to_aevos_memtype(UINT32 efi_type) {
     }
 }
 
+/* ── Minimal boot.json parser (no heap allocation) ────── */
+
+static int boot_strcmp(const char *a, const char *b)
+{
+    while (*a && *b && *a == *b) { a++; b++; }
+    return (unsigned char)*a - (unsigned char)*b;
+}
+
+static const char *skip_ws(const char *p)
+{
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') p++;
+    return p;
+}
+
+/*
+ * Extract a JSON string value (unquoted) into dst.
+ * *pp must point at the opening '"'.  Returns 0 on success.
+ */
+static int json_extract_str(const char **pp, char *dst, UINTN max)
+{
+    const char *p = *pp;
+    if (*p != '"') return -1;
+    p++;
+    UINTN i = 0;
+    while (*p && *p != '"') {
+        if (*p == '\\') { p++; if (!*p) return -1; }
+        if (i < max - 1) dst[i++] = *p;
+        p++;
+    }
+    if (*p != '"') return -1;
+    p++;
+    dst[i] = '\0';
+    *pp = p;
+    return 0;
+}
+
+static UINT64 json_extract_uint(const char **pp)
+{
+    const char *p = *pp;
+    UINT64 val = 0;
+    while (*p >= '0' && *p <= '9') {
+        val = val * 10 + (*p - '0');
+        p++;
+    }
+    *pp = p;
+    return val;
+}
+
+static int json_extract_bool(const char **pp)
+{
+    const char *p = *pp;
+    if (p[0] == 't' && p[1] == 'r' && p[2] == 'u' && p[3] == 'e') {
+        *pp = p + 4;
+        return 1;
+    }
+    if (p[0] == 'f' && p[1] == 'a' && p[2] == 'l' && p[3] == 's' && p[4] == 'e') {
+        *pp = p + 5;
+        return 0;
+    }
+    return -1;
+}
+
+/*
+ * Parse a minimal boot.json into aevos_boot_cfg_t.
+ * Expects a flat JSON object with known keys.
+ */
+static void parse_boot_json(const char *json, aevos_boot_cfg_t *cfg)
+{
+    const char *p = skip_ws(json);
+    if (*p != '{') return;
+    p++;
+
+    while (1) {
+        p = skip_ws(p);
+        if (*p == '}' || *p == '\0') break;
+
+        char key[64];
+        if (json_extract_str(&p, key, sizeof(key)) != 0) break;
+
+        p = skip_ws(p);
+        if (*p != ':') break;
+        p++;
+        p = skip_ws(p);
+
+        if (boot_strcmp(key, "model_path") == 0) {
+            json_extract_str(&p, cfg->model_path, sizeof(cfg->model_path));
+        } else if (boot_strcmp(key, "n_ctx") == 0) {
+            cfg->n_ctx = (UINT32)json_extract_uint(&p);
+        } else if (boot_strcmp(key, "n_threads") == 0) {
+            cfg->n_threads = (UINT32)json_extract_uint(&p);
+        } else if (boot_strcmp(key, "use_gpu") == 0) {
+            int v = json_extract_bool(&p);
+            if (v >= 0) cfg->use_gpu = (UINT8)v;
+        } else if (boot_strcmp(key, "target_fps") == 0) {
+            cfg->target_fps = (UINT32)json_extract_uint(&p);
+        } else if (boot_strcmp(key, "screen_width") == 0) {
+            cfg->screen_width = (UINT32)json_extract_uint(&p);
+        } else if (boot_strcmp(key, "screen_height") == 0) {
+            cfg->screen_height = (UINT32)json_extract_uint(&p);
+        } else {
+            /* skip unknown value */
+            if (*p == '"') {
+                char dummy[256];
+                json_extract_str(&p, dummy, sizeof(dummy));
+            } else if (*p == 't' || *p == 'f') {
+                json_extract_bool(&p);
+            } else {
+                json_extract_uint(&p);
+            }
+        }
+
+        p = skip_ws(p);
+        if (*p == ',') p++;
+    }
+}
+
+/*
+ * Read \EFI\AevOS\boot.json from ESP and apply it to cfg.
+ * Returns EFI_SUCCESS if file found and parsed, EFI_NOT_FOUND otherwise.
+ */
+static EFI_STATUS load_boot_json(EFI_BOOT_SERVICES *bs, EFI_HANDLE image_handle,
+                                  aevos_boot_cfg_t *cfg)
+{
+    EFI_GUID lip_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+    EFI_GUID fs_guid  = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+    VOID *lip_raw = 0;
+    EFI_STATUS status;
+
+    typedef struct {
+        UINT32 Revision;
+        EFI_HANDLE ParentHandle;
+        VOID *SystemTable;
+        EFI_HANDLE DeviceHandle;
+        VOID *FilePath;
+        VOID *Reserved;
+        UINT32 LoadOptionsSize;
+        VOID *LoadOptions;
+        VOID *ImageBase;
+        UINT64 ImageSize;
+        EFI_MEMORY_TYPE ImageCodeType;
+        EFI_MEMORY_TYPE ImageDataType;
+        VOID *Unload;
+    } EFI_LOADED_IMAGE;
+
+    status = bs->HandleProtocol(image_handle, &lip_guid, &lip_raw);
+    if (status != EFI_SUCCESS) return status;
+
+    EFI_LOADED_IMAGE *li = (EFI_LOADED_IMAGE *)lip_raw;
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = 0;
+    status = bs->HandleProtocol(li->DeviceHandle, &fs_guid, (VOID **)&fs);
+    if (status != EFI_SUCCESS) return status;
+
+    EFI_FILE_PROTOCOL *root = 0;
+    status = fs->OpenVolume(fs, &root);
+    if (status != EFI_SUCCESS) return status;
+
+    EFI_FILE_PROTOCOL *jfile = 0;
+    CHAR16 jpath[] = u"\\EFI\\AevOS\\boot.json";
+    status = root->Open(root, &jfile, jpath, EFI_FILE_MODE_READ, 0);
+    if (status != EFI_SUCCESS) {
+        root->Close(root);
+        return EFI_NOT_FOUND;
+    }
+
+    #define BOOTJSON_MAX_SIZE 4096
+    VOID *buf = 0;
+    status = bs->AllocatePool(EfiLoaderData, BOOTJSON_MAX_SIZE + 1, &buf);
+    if (status != EFI_SUCCESS) {
+        jfile->Close(jfile);
+        root->Close(root);
+        return status;
+    }
+
+    UINTN read_sz = BOOTJSON_MAX_SIZE;
+    status = jfile->Read(jfile, &read_sz, buf);
+    jfile->Close(jfile);
+    root->Close(root);
+
+    if (status != EFI_SUCCESS) {
+        bs->FreePool(buf);
+        return status;
+    }
+
+    ((char *)buf)[read_sz] = '\0';
+    parse_boot_json((const char *)buf, cfg);
+    bs->FreePool(buf);
+    return EFI_SUCCESS;
+}
+
 /* ── Find ACPI RSDP ───────────────────────────────────── */
 
 static UINT64 find_rsdp(EFI_SYSTEM_TABLE *st) {
@@ -571,15 +760,41 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     print_hex(entry_point);
     print(u"\r\n");
 
-    /* 4. Default boot config */
-    const char model[] = "/models/default.gguf";
-    boot_memcpy(bi->cfg.model_path, model, sizeof(model));
-    bi->cfg.n_ctx         = 32768;
-    bi->cfg.n_threads     = 4;
-    bi->cfg.use_gpu       = 0;
-    bi->cfg.target_fps    = 60;
-    bi->cfg.screen_width  = fb_work.width;
-    bi->cfg.screen_height = fb_work.height;
+    /* 4. Boot config — defaults, then optional \\EFI\\AevOS\\boot.json */
+    {
+        const char model[] = "/models/default.gguf";
+        aevos_boot_cfg_t cfg_work;
+        boot_memset(&cfg_work, 0, sizeof(cfg_work));
+        boot_memcpy(cfg_work.model_path, model, sizeof(model));
+        cfg_work.n_ctx         = 32768;
+        cfg_work.n_threads     = 4;
+        cfg_work.use_gpu       = 0;
+        cfg_work.target_fps    = 60;
+        cfg_work.screen_width  = fb_work.width;
+        cfg_work.screen_height = fb_work.height;
+
+        print(u"[cfg] boot.json...\r\n");
+        EFI_STATUS jstat = load_boot_json(bs, image_handle, &cfg_work);
+        if (jstat == EFI_SUCCESS)
+            print(u"[cfg] boot.json loaded\r\n");
+        else
+            print(u"[cfg] boot.json missing, defaults\r\n");
+
+        if (cfg_work.model_path[0] == '\0')
+            boot_memcpy(cfg_work.model_path, model, sizeof(model));
+        if (cfg_work.n_ctx == 0)
+            cfg_work.n_ctx = 32768;
+        if (cfg_work.n_threads == 0)
+            cfg_work.n_threads = 4;
+        if (cfg_work.target_fps == 0)
+            cfg_work.target_fps = 60;
+        if (cfg_work.screen_width == 0)
+            cfg_work.screen_width = fb_work.width;
+        if (cfg_work.screen_height == 0)
+            cfg_work.screen_height = fb_work.height;
+
+        boot_memcpy(&bi->cfg, &cfg_work, sizeof(bi->cfg));
+    }
 
     /* 5. ACPI RSDP */
     bi->rsdp = find_rsdp(st);

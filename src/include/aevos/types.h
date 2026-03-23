@@ -91,3 +91,6 @@ static inline bool spin_try_lock(spinlock_t *lock) {
 #define EEXIST           9
 #define ENOTSUP         10
 #define EBADF           11
+#define EISDIR          12
+#define ENOTDIR         13
+#define EROFS           14

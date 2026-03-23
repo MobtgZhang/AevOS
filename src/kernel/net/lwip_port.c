@@ -1,4 +1,6 @@
 #include "lwip_port.h"
+#include "../drivers/pci.h"
+#include "../drivers/virtio_net.h"
 #include <aevos/config.h>
 #include <kernel/mm/slab.h>
 #include <kernel/klog.h>
@@ -53,6 +55,11 @@ int net_init(void)
     return 0;
 }
 
+void net_poll(void)
+{
+    virtio_net_poll();
+}
+
 void net_set_interface(net_interface_t *iface)
 {
     g_iface = iface;
@@ -90,7 +97,11 @@ int eth_receive(void *buf, size_t max_len)
     if (!g_iface || !g_iface->recv_raw)
         return -EIO;
     ssize_t n = g_iface->recv_raw(buf, max_len);
-    return (n > 0) ? (int)n : -EIO;
+    if (n == 0)
+        return 0;
+    if (n < 0)
+        return (int)n;
+    return (int)n;
 }
 
 /* ── ARP ──────────────────────────────────────────────────────────── */
@@ -700,45 +711,38 @@ int net_process_frame(const void *frame, size_t len)
     }
 }
 
-/* ── PCI NIC detection (virtio-net / e1000) ───────────────────────── */
-
-static uint32_t pci_read(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset)
-{
-    uint32_t addr = (uint32_t)((bus << 16) | (slot << 11) | (func << 8) |
-                               (offset & 0xFC) | 0x80000000);
-    outl(PCI_CONFIG_ADDR, addr);
-    return inl(PCI_CONFIG_DATA);
-}
+/* ── PCI NIC detection (virtio-net / e1000) — uses kernel PCI enumerator ─ */
 
 int net_detect_pci(void)
 {
     klog("net: scanning PCI for network controllers...\n");
 
-    for (uint16_t bus = 0; bus < 256; bus++) {
-        for (uint8_t slot = 0; slot < 32; slot++) {
-            uint32_t id = pci_read((uint8_t)bus, slot, 0, 0);
-            if (id == 0xFFFFFFFF) continue;
+    for (uint32_t i = 0; i < pci_get_device_count(); i++) {
+        pci_device_t *d = pci_get_device(i);
+        if (!d)
+            continue;
 
-            uint16_t vendor = id & 0xFFFF;
-            uint16_t device = id >> 16;
+        if (d->vendor_id == 0x8086 &&
+            (d->device_id == 0x100E || d->device_id == 0x100F ||
+             d->device_id == 0x10D3 || d->device_id == 0x153A)) {
+            klog("net: found Intel e1000 at PCI %u:%u.%u\n",
+                 d->bus, d->device, d->function);
+            return 0;
+        }
 
-            /* Intel e1000 variants */
-            if (vendor == 0x8086 &&
-                (device == 0x100E || device == 0x100F ||
-                 device == 0x10D3 || device == 0x153A)) {
-                klog("net: found Intel e1000 at PCI %u:%u.0 (dev=0x%x)\n",
-                     bus, slot, device);
+        if (d->vendor_id == 0x1AF4 && d->device_id == 0x1041) {
+            klog("net: found virtio-net (modern) at PCI %u:%u.%u\n",
+                 d->bus, d->device, d->function);
+            return 0;
+        }
+
+        if (d->vendor_id == 0x1AF4 && d->device_id >= 0x1000 &&
+            d->device_id <= 0x103F) {
+            uint32_t sub = pci_read_config(d->bus, d->device, d->function, 0x2C);
+            if ((sub >> 16) == 1) {
+                klog("net: found virtio-net (transitional) at PCI %u:%u.%u\n",
+                     d->bus, d->device, d->function);
                 return 0;
-            }
-
-            /* Virtio network device */
-            if (vendor == 0x1AF4 && device >= 0x1000 && device <= 0x103F) {
-                uint32_t subsys = pci_read((uint8_t)bus, slot, 0, 0x2C);
-                uint16_t subsys_id = subsys >> 16;
-                if (subsys_id == 1) { /* network device */
-                    klog("net: found virtio-net at PCI %u:%u.0\n", bus, slot);
-                    return 0;
-                }
             }
         }
     }

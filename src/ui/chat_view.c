@@ -58,6 +58,34 @@ void chat_view_add_message(chat_view_t *cv, chat_role_t role,
         cv->scroll_offset = 0;
 }
 
+void chat_view_append_stream_chunk(chat_view_t *cv, const char *chunk)
+{
+    if (!cv || !chunk || !*chunk || cv->message_count == 0)
+        return;
+    chat_message_t *last = &cv->messages[cv->message_count - 1];
+    size_t cur = strlen(last->text);
+    size_t cl = strlen(chunk);
+    if (cur + cl >= CHAT_MSG_TEXT_SIZE)
+        cl = CHAT_MSG_TEXT_SIZE - 1 - cur;
+    if (cl == 0)
+        return;
+    memcpy(last->text + cur, chunk, cl);
+    last->text[cur + cl] = '\0';
+    last->is_streaming = true;
+
+    int total_h = 0;
+    const font_t *fnt = font_get_default();
+    int bubble_w = cv->view_rect.w - PADDING * 4 - 40;
+    for (int i = 0; i < cv->message_count; i++) {
+        int h = font_measure_string_wrapped(cv->messages[i].text,
+                                            bubble_w, fnt);
+        total_h += h + PADDING * 3 + fnt->height;
+    }
+    int view_h = cv->view_rect.h - INPUT_HEIGHT - PADDING;
+    if (total_h > view_h)
+        cv->scroll_offset = total_h - view_h;
+}
+
 void chat_view_update_streaming(chat_view_t *cv, const char *text)
 {
     if (!cv || !text || cv->message_count == 0)

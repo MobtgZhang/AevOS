@@ -126,5 +126,11 @@ void idt_init(void)
 
 void pic_init(void)
 {
-    /* ARM64 uses GIC (Generic Interrupt Controller), stub for now */
+    /*
+     * QEMU virt: GICv3 (default) or GIC-400 @ 0x08000000 (dist) when gic-version=2.
+     * Full bring-up needs GICD/GICC/GICR init + timer PPI routing; timer currently
+     * uses the arch timer without SPI delivery in this tree.
+     */
+    serial_putchar('\n');
+    exc_puts("[pic] aarch64: GIC enable left to platform timer/virt path\n");
 }

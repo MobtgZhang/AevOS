@@ -244,3 +244,19 @@ pci_device_t *pci_get_device(uint32_t index)
     if (index >= device_count) return NULL;
     return &devices[index];
 }
+
+void *pci_bar_to_mmio_vaddr(uint64_t bar_phys)
+{
+#if defined(__x86_64__)
+    if (bar_phys < 0x100000000ULL)
+        return (void *)(uintptr_t)bar_phys;
+    if (bar_phys >= AEVOS_X86_PCI_MMIO64_PHYS_LO &&
+        bar_phys < AEVOS_X86_PCI_MMIO64_PHYS_LO + AEVOS_X86_PCI_MMIO64_PHYS_SZ)
+        return (void *)(uintptr_t)(PHYS_MAP_BASE + bar_phys);
+    klog("[pci] MMIO BAR phys %llx outside high MMIO window (extend SZ in pci.h)\n",
+         (unsigned long long)bar_phys);
+    return NULL;
+#else
+    return (void *)(uintptr_t)bar_phys;
+#endif
+}

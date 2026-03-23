@@ -14,6 +14,76 @@ typedef __builtin_va_list va_list;
 #define va_end(ap)         __builtin_va_end(ap)
 #define va_arg(ap, type)   __builtin_va_arg(ap, type)
 
+static bool str_starts_with(const char *str, const char *prefix)
+{
+    while (*prefix) {
+        if (*str != *prefix)
+            return false;
+        str++;
+        prefix++;
+    }
+    return true;
+}
+
+static bool str_equal(const char *a, const char *b)
+{
+    while (*a && *b) {
+        if (*a != *b)
+            return false;
+        a++;
+        b++;
+    }
+    return *a == *b;
+}
+
+static void term_env_set(terminal_t *term, const char *key, const char *val)
+{
+    if (!term || !key || !*key)
+        return;
+
+    for (int i = 0; i < term->env_count; i++) {
+        if (str_equal(term->env[i].key, key)) {
+            if (val) {
+                strncpy(term->env[i].val, val, TERM_ENV_VAL_LEN - 1);
+                term->env[i].val[TERM_ENV_VAL_LEN - 1] = '\0';
+            } else {
+                for (int j = i; j < term->env_count - 1; j++)
+                    term->env[j] = term->env[j + 1];
+                term->env_count--;
+            }
+            return;
+        }
+    }
+
+    if (!val)
+        return;
+    if (term->env_count >= TERM_MAX_ENV)
+        return;
+
+    terminal_env_entry_t *e = &term->env[term->env_count++];
+    strncpy(e->key, key, TERM_ENV_KEY_LEN - 1);
+    e->key[TERM_ENV_KEY_LEN - 1] = '\0';
+    strncpy(e->val, val, TERM_ENV_VAL_LEN - 1);
+    e->val[TERM_ENV_VAL_LEN - 1] = '\0';
+}
+
+static const char *term_env_get(terminal_t *term, const char *key)
+{
+    if (!term || !key)
+        return NULL;
+
+    for (int i = 0; i < term->env_count; i++) {
+        if (str_equal(term->env[i].key, key))
+            return term->env[i].val;
+    }
+    return NULL;
+}
+
+static void term_env_unset(terminal_t *term, const char *key)
+{
+    term_env_set(term, key, NULL);
+}
+
 void terminal_init(terminal_t *term, rect_t bounds)
 {
     if (!term)
@@ -29,9 +99,21 @@ void terminal_init(terminal_t *term, rect_t bounds)
     term->history_count = 0;
     term->history_index = -1;
     term->blink_counter = 0;
+    term->env_count    = 0;
 
-    terminal_print(term, "AevOS Terminal v0.5.0");
-    terminal_print(term, "Type 'help' for available commands.");
+    strncpy(term->cwd, "/workspace", TERM_CWD_LEN - 1);
+    term->cwd[TERM_CWD_LEN - 1] = '\0';
+
+    term_env_set(term, "HOME", "/workspace");
+    term_env_set(term, "USER", "aevos");
+    term_env_set(term, "SHELL", "/bin/bash");
+    term_env_set(term, "PATH", "/bin:/usr/bin:/sandbox/bin");
+    term_env_set(term, "PWD", term->cwd);
+    term_env_set(term, "PS1", "\\u@AevOS:\\w\\$ ");
+
+    terminal_print(term, "AevOS Terminal v0.6.0 (bash-like subset)");
+    terminal_print(term, "Virtual roots: /workspace, /sandbox, /tmp");
+    terminal_print(term, "Type 'help' for commands.");
     terminal_print(term, "");
 }
 
@@ -183,31 +265,378 @@ void terminal_printf(terminal_t *term, const char *fmt, ...)
     terminal_print(term, buf);
 }
 
-static bool str_starts_with(const char *str, const char *prefix)
+static const char *skip_ws(const char *s)
 {
-    while (*prefix) {
-        if (*str != *prefix)
-            return false;
-        str++;
-        prefix++;
+    if (!s)
+        return "";
+    while (*s == ' ' || *s == '\t')
+        s++;
+    return s;
+}
+
+static void trim_trailing_ws(char *s)
+{
+    size_t n = strlen(s);
+    while (n > 0 &&
+           (s[n - 1] == ' ' || s[n - 1] == '\t' ||
+            s[n - 1] == '\n' || s[n - 1] == '\r')) {
+        s[n - 1] = '\0';
+        n--;
     }
+}
+
+static void trim_inplace(char *s)
+{
+    const char *a = skip_ws(s);
+    if (a != s)
+        memmove(s, a, strlen(a) + 1);
+    trim_trailing_ws(s);
+}
+
+static bool cmd_word_is(const char *line, const char *name)
+{
+    size_t n = strlen(name);
+    if (!str_starts_with(line, name))
+        return false;
+    return line[n] == '\0' || line[n] == ' ' || line[n] == '\t';
+}
+
+static void strip_shell_comment(char *s)
+{
+    bool sq = false, dq = false;
+    for (char *p = s; *p; p++) {
+        if (!sq && *p == '"')
+            dq = !dq;
+        else if (!dq && *p == '\'')
+            sq = !sq;
+        else if (!sq && !dq && *p == '#') {
+            *p = '\0';
+            break;
+        }
+    }
+}
+
+#define TERM_PATH_MAX_SEG   24
+#define TERM_PATH_SEG_LEN   48
+
+static int path_push_seg(char segs[][TERM_PATH_SEG_LEN], int n, int max,
+                         const char *tok, int tok_len)
+{
+    if (n >= max || tok_len <= 0)
+        return n;
+
+    char tmp[TERM_PATH_SEG_LEN];
+    if (tok_len >= TERM_PATH_SEG_LEN)
+        tok_len = TERM_PATH_SEG_LEN - 1;
+    memcpy(tmp, tok, tok_len);
+    tmp[tok_len] = '\0';
+
+    if (str_equal(tmp, ".") || tmp[0] == '\0')
+        return n;
+    if (str_equal(tmp, "..")) {
+        if (n > 0)
+            n--;
+        return n;
+    }
+
+    strncpy(segs[n], tmp, TERM_PATH_SEG_LEN - 1);
+    segs[n][TERM_PATH_SEG_LEN - 1] = '\0';
+    return n + 1;
+}
+
+static int path_tokenize_into(const char *path, char segs[][TERM_PATH_SEG_LEN],
+                              int max, int start_n)
+{
+    const char *p = path;
+    int n = start_n;
+
+    while (*p == '/')
+        p++;
+
+    while (*p && n < max) {
+        const char *e = p;
+        while (*e && *e != '/')
+            e++;
+        n = path_push_seg(segs, n, max, p, (int)(e - p));
+        p = e;
+        while (*p == '/')
+            p++;
+    }
+    return n;
+}
+
+static bool path_build(char segs[][TERM_PATH_SEG_LEN], int n,
+                       char *out, size_t cap)
+{
+    if (n == 0) {
+        if (cap < 2)
+            return false;
+        out[0] = '/';
+        out[1] = '\0';
+        return true;
+    }
+
+    size_t pos = 0;
+    for (int i = 0; i < n; i++) {
+        size_t sl = strlen(segs[i]);
+        if (pos + 1 + sl + 1 > cap)
+            return false;
+        out[pos++] = '/';
+        memcpy(out + pos, segs[i], sl);
+        pos += sl;
+    }
+    out[pos] = '\0';
     return true;
 }
 
-static bool str_equal(const char *a, const char *b)
+static bool term_path_resolve(terminal_t *term, const char *in,
+                              char *out, size_t cap)
 {
-    while (*a && *b) {
-        if (*a != *b)
-            return false;
-        a++;
-        b++;
+    char segs[TERM_PATH_MAX_SEG][TERM_PATH_SEG_LEN];
+    int n = 0;
+
+    if (!in || !*in)
+        in = ".";
+
+    if (in[0] == '/') {
+        n = path_tokenize_into(in, segs, TERM_PATH_MAX_SEG, 0);
+    } else {
+        n = path_tokenize_into(term->cwd, segs, TERM_PATH_MAX_SEG, 0);
+        n = path_tokenize_into(in, segs, TERM_PATH_MAX_SEG, n);
     }
-    return *a == *b;
+
+    return path_build(segs, n, out, cap);
+}
+
+static bool term_path_allowed(const char *path)
+{
+    if (!path || path[0] != '/')
+        return false;
+    if (str_equal(path, "/"))
+        return true;
+    if (str_starts_with(path, "/workspace"))
+        return true;
+    if (str_starts_with(path, "/sandbox"))
+        return true;
+    if (str_starts_with(path, "/tmp"))
+        return true;
+    return false;
+}
+
+static const char *vfs_ls(const char *path)
+{
+    if (str_equal(path, "/"))
+        return "workspace  sandbox  tmp";
+    if (str_equal(path, "/workspace"))
+        return "kernel  agent  ui  lib  llm  boot";
+    if (str_equal(path, "/sandbox"))
+        return "project";
+    if (str_equal(path, "/sandbox/project"))
+        return "(empty)";
+    if (str_equal(path, "/tmp"))
+        return "(empty)";
+    if (str_starts_with(path, "/workspace/"))
+        return "(dir)";
+    if (str_starts_with(path, "/sandbox/"))
+        return "(dir)";
+    return NULL;
+}
+
+static void term_expand_vars(terminal_t *term, const char *in,
+                             char *out, size_t cap)
+{
+    size_t o = 0;
+    out[0] = '\0';
+    if (!in)
+        return;
+
+    while (*in && o + 1 < cap) {
+        if (*in == '$') {
+            in++;
+            char key[TERM_ENV_KEY_LEN];
+            int k = 0;
+
+            if (*in == '{') {
+                in++;
+                while (*in && *in != '}' && k < TERM_ENV_KEY_LEN - 1)
+                    key[k++] = *in++;
+                key[k] = '\0';
+                if (*in == '}')
+                    in++;
+            } else {
+                while (*in &&
+                       ((*in >= 'A' && *in <= 'Z') ||
+                        (*in >= 'a' && *in <= 'z') ||
+                        (*in >= '0' && *in <= '9') ||
+                        *in == '_') &&
+                       k < TERM_ENV_KEY_LEN - 1)
+                    key[k++] = *in++;
+                key[k] = '\0';
+            }
+
+            const char *v = term_env_get(term, key);
+            if (v) {
+                size_t vl = strlen(v);
+                if (o + vl >= cap)
+                    break;
+                memcpy(out + o, v, vl);
+                o += vl;
+                out[o] = '\0';
+            }
+            continue;
+        }
+        out[o++] = *in++;
+        out[o] = '\0';
+    }
+}
+
+static void term_format_prompt(terminal_t *term, char *buf, size_t cap)
+{
+    const char *user = term_env_get(term, "USER");
+    if (!user || !user[0])
+        user = "aevos";
+    snprintf(buf, cap, "%s@AevOS:%s$ ", user, term->cwd);
+}
+
+static void cmd_echo(terminal_t *term, const char *args)
+{
+    char tmp[TERM_LINE_LEN];
+    char out[TERM_LINE_LEN];
+
+    strncpy(tmp, skip_ws(args), sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    term_expand_vars(term, tmp, out, sizeof(out));
+    terminal_print(term, out);
+}
+
+static void cmd_pwd(terminal_t *term)
+{
+    terminal_print(term, term->cwd);
+}
+
+static void cmd_cd(terminal_t *term, const char *args)
+{
+    const char *a = skip_ws(args);
+    char target[TERM_CWD_LEN];
+
+    if (*a == '\0') {
+        const char *home = term_env_get(term, "HOME");
+        if (!home || !home[0])
+            home = "/workspace";
+        strncpy(target, home, sizeof(target) - 1);
+        target[sizeof(target) - 1] = '\0';
+    } else {
+        if (!term_path_resolve(term, a, target, sizeof(target))) {
+            terminal_print(term, "cd: path too long");
+            return;
+        }
+    }
+
+    if (!term_path_allowed(target)) {
+        terminal_print(term, "cd: permission denied (sandbox roots only)");
+        return;
+    }
+
+    strncpy(term->cwd, target, TERM_CWD_LEN - 1);
+    term->cwd[TERM_CWD_LEN - 1] = '\0';
+    term_env_set(term, "PWD", term->cwd);
+}
+
+static void cmd_export(terminal_t *term, const char *args)
+{
+    const char *a = skip_ws(args);
+    if (*a == '\0') {
+        for (int i = 0; i < term->env_count; i++) {
+            terminal_printf(term, "export %s=\"%s\"",
+                            term->env[i].key, term->env[i].val);
+        }
+        return;
+    }
+
+    char key[TERM_ENV_KEY_LEN];
+    const char *eq = a;
+    while (*eq && *eq != '=')
+        eq++;
+
+    if (*eq != '=') {
+        term_env_set(term, a, "");
+        return;
+    }
+
+    int kl = (int)(eq - a);
+    if (kl <= 0 || kl >= TERM_ENV_KEY_LEN) {
+        terminal_print(term, "export: invalid name");
+        return;
+    }
+
+    memcpy(key, a, kl);
+    key[kl] = '\0';
+    term_env_set(term, key, eq + 1);
+    if (str_equal(key, "PWD"))
+        strncpy(term->cwd, eq + 1, TERM_CWD_LEN - 1);
+}
+
+static void cmd_unset(terminal_t *term, const char *args)
+{
+    const char *a = skip_ws(args);
+    if (*a == '\0') {
+        terminal_print(term, "unset: variable name required");
+        return;
+    }
+    term_env_unset(term, a);
+}
+
+static void cmd_env(terminal_t *term)
+{
+    for (int i = 0; i < term->env_count; i++)
+        terminal_printf(term, "%s=%s",
+                        term->env[i].key, term->env[i].val);
+}
+
+static void cmd_ls(terminal_t *term, const char *args)
+{
+    const char *a = skip_ws(args);
+    char path[TERM_CWD_LEN];
+
+    if (*a == '\0') {
+        strncpy(path, term->cwd, sizeof(path) - 1);
+        path[sizeof(path) - 1] = '\0';
+    } else {
+        if (!term_path_resolve(term, a, path, sizeof(path))) {
+            terminal_print(term, "ls: path too long");
+            return;
+        }
+    }
+
+    if (!term_path_allowed(path)) {
+        terminal_print(term, "ls: permission denied");
+        return;
+    }
+
+    const char *listing = vfs_ls(path);
+    if (!listing)
+        terminal_print(term, "ls: no such virtual directory");
+    else
+        terminal_print(term, listing);
+}
+
+static void cmd_shell_banner(terminal_t *term, const char *name)
+{
+    terminal_printf(term,
+                    "Running AevOS shell (bash-like). "
+                    "Requested `%s` — no separate process model in-kernel.",
+                    name);
 }
 
 static void cmd_help(terminal_t *term)
 {
     terminal_print(term, "Available commands:");
+    terminal_print(term, "  echo, pwd, cd     - POSIX/bash-style (virtual FS)");
+    terminal_print(term, "  export, unset, env - Environment");
+    terminal_print(term, "  ls                 - List virtual directories");
+    terminal_print(term, "  bash | sh          - Shell identity (no fork)");
+    terminal_print(term, "  true | false | :   - No-op / false / no-op");
+    terminal_print(term, "  exit               - Message only (kernel stays up)");
     terminal_print(term, "  help               - Show this help message");
     terminal_print(term, "  clear              - Clear terminal output");
     terminal_print(term, "  agent list         - List active agents");
@@ -316,8 +745,18 @@ void terminal_execute_command(terminal_t *term, const char *cmd)
     if (*cmd == '\0')
         return;
 
+    char work[TERM_LINE_LEN];
+    strncpy(work, cmd, sizeof(work) - 1);
+    work[sizeof(work) - 1] = '\0';
+    strip_shell_comment(work);
+    trim_inplace(work);
+    if (work[0] == '\0')
+        return;
+
     char prompt_line[TERM_LINE_LEN];
-    snprintf(prompt_line, sizeof(prompt_line), "aevos> %s", cmd);
+    char pfx[TERM_LINE_LEN];
+    term_format_prompt(term, pfx, sizeof(pfx));
+    snprintf(prompt_line, sizeof(prompt_line), "%s%s", pfx, cmd);
     terminal_add_line(term, prompt_line, COLOR_GREEN);
 
     if (term->history_count < TERM_HISTORY_COUNT) {
@@ -328,33 +767,57 @@ void terminal_execute_command(terminal_t *term, const char *cmd)
     }
     term->history_index = term->history_count;
 
-    if (str_equal(cmd, "help")) {
+    const char *w = work;
+
+    if (cmd_word_is(w, "echo")) {
+        cmd_echo(term, w + 4);
+    } else if (cmd_word_is(w, "pwd")) {
+        cmd_pwd(term);
+    } else if (cmd_word_is(w, "cd")) {
+        cmd_cd(term, w + 2);
+    } else if (cmd_word_is(w, "export")) {
+        cmd_export(term, w + 6);
+    } else if (cmd_word_is(w, "unset")) {
+        cmd_unset(term, w + 5);
+    } else if (cmd_word_is(w, "env")) {
+        cmd_env(term);
+    } else if (cmd_word_is(w, "ls")) {
+        cmd_ls(term, w + 2);
+    } else if (cmd_word_is(w, "bash") || cmd_word_is(w, "sh")) {
+        cmd_shell_banner(term, w);
+    } else if (str_equal(w, "true") || str_equal(w, ":")) {
+        /* no-op */
+    } else if (str_equal(w, "false")) {
+        /* bash false exits 1; no job control in-kernel */
+    } else if (cmd_word_is(w, "exit")) {
+        terminal_print(term, "exit: not supported in-kernel session");
+    } else if (str_equal(w, "help")) {
         cmd_help(term);
-    } else if (str_equal(cmd, "clear")) {
+    } else if (str_equal(w, "clear")) {
         term->line_count   = 0;
         term->scroll_offset = 0;
-    } else if (str_starts_with(cmd, "agent ")) {
-        cmd_agent(term, cmd + 6);
-    } else if (str_equal(cmd, "agent")) {
+    } else if (str_starts_with(w, "agent ")) {
+        cmd_agent(term, w + 6);
+    } else if (str_equal(w, "agent")) {
         cmd_agent(term, "");
-    } else if (str_starts_with(cmd, "skill ")) {
-        cmd_skill(term, cmd + 6);
-    } else if (str_equal(cmd, "skill")) {
+    } else if (str_starts_with(w, "skill ")) {
+        cmd_skill(term, w + 6);
+    } else if (str_equal(w, "skill")) {
         cmd_skill(term, "");
-    } else if (str_starts_with(cmd, "memory ")) {
-        cmd_memory(term, cmd + 7);
-    } else if (str_equal(cmd, "memory")) {
+    } else if (str_starts_with(w, "memory ")) {
+        cmd_memory(term, w + 7);
+    } else if (str_equal(w, "memory")) {
         cmd_memory(term, "");
-    } else if (str_starts_with(cmd, "history")) {
-        cmd_history(term, cmd + 7);
-    } else if (str_equal(cmd, "sysinfo")) {
+    } else if (str_starts_with(w, "history")) {
+        cmd_history(term, w + 7);
+    } else if (str_equal(w, "sysinfo")) {
         cmd_sysinfo(term);
-    } else if (str_equal(cmd, "reboot")) {
+    } else if (str_equal(w, "reboot")) {
         terminal_print(term, "Rebooting AevOS...");
         klog("reboot requested via terminal\n");
     } else {
         terminal_printf(term, "Unknown command: '%s'. Type 'help' for commands.",
-                        cmd);
+                        w);
     }
 
     int fnt_h = FONT_HEIGHT;
@@ -413,11 +876,14 @@ void terminal_render(terminal_t *term, fb_ctx_t *fb)
     int prompt_x = term->bounds.x + PADDING;
     int text_y = input_y + PADDING;
 
-    font_draw_string(fb, prompt_x, text_y, "aevos> ",
+    char prompt_buf[TERM_LINE_LEN];
+    term_format_prompt(term, prompt_buf, sizeof(prompt_buf));
+    int prompt_px = font_measure_string(prompt_buf, fnt);
+    font_draw_string(fb, prompt_x, text_y, prompt_buf,
                      COLOR_GREEN, 0, fnt);
-    prompt_x += fnt->width * 7;
+    prompt_x += prompt_px;
 
-    int max_chars = (term->bounds.w - PADDING * 2 - fnt->width * 7) / fnt->width;
+    int max_chars = (term->bounds.w - PADDING * 2 - prompt_px) / fnt->width;
     int start = 0;
     if (term->cursor_pos > max_chars)
         start = term->cursor_pos - max_chars;
@@ -436,6 +902,8 @@ void terminal_render(terminal_t *term, fb_ctx_t *fb)
 }
 
 static const char *builtin_commands[] = {
+    "echo", "pwd", "cd", "export", "unset", "env", "ls",
+    "bash", "sh", "true", "false", "exit", ":",
     "help", "clear", "agent", "skill", "memory",
     "history", "sysinfo", "reboot", NULL
 };

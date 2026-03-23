@@ -250,16 +250,26 @@ static bool parse_capabilities(pci_device_t *dev)
 
     bool found_common = false;
 
-    while (cap_off && cap_off < 0xFF) {
+    unsigned cap_hops = 0;
+    while (cap_off && cap_off < 0xFF && cap_hops++ < 64) {
         uint8_t cap_id = pci_read_config8(dev->bus, dev->device, dev->function, cap_off);
 
         if (cap_id == 0x09) { /* VIRTIO_PCI_CAP_ID */
             uint8_t cfg_type = pci_read_config8(dev->bus, dev->device, dev->function, cap_off + 3);
             uint8_t bar      = pci_read_config8(dev->bus, dev->device, dev->function, cap_off + 4);
-            uint32_t offset  = pci_read_config(dev->bus, dev->device, dev->function, (uint8_t)((cap_off + 8) & 0xFC));
-            offset >>= ((cap_off + 8) & 3) * 8;
-            offset = pci_read_config(dev->bus, dev->device, dev->function, (uint8_t)(cap_off + 8));
+            uint32_t offset  = pci_read_config(dev->bus, dev->device, dev->function, (uint8_t)(cap_off + 8));
             uint32_t length  = pci_read_config(dev->bus, dev->device, dev->function, (uint8_t)(cap_off + 12));
+
+            if (bar >= 6) {
+                cap_off = pci_read_config8(dev->bus, dev->device, dev->function, cap_off + 1);
+                continue;
+            }
+            uint32_t bar_raw = pci_read_config(dev->bus, dev->device, dev->function,
+                                                 (uint8_t)(PCI_CFG_BAR0 + bar * 4u));
+            if (bar_raw & PCI_BAR_IO) {
+                cap_off = pci_read_config8(dev->bus, dev->device, dev->function, cap_off + 1);
+                continue;
+            }
 
             uint64_t bar_addr = dev->bar[bar];
             if (!bar_addr) {
@@ -267,7 +277,13 @@ static bool parse_capabilities(pci_device_t *dev)
                 continue;
             }
 
-            volatile uint8_t *base = (volatile uint8_t *)(bar_addr + offset);
+            void *mmio_v = pci_bar_to_mmio_vaddr(bar_addr);
+            if (!mmio_v) {
+                cap_off = pci_read_config8(dev->bus, dev->device, dev->function, cap_off + 1);
+                continue;
+            }
+            volatile uint8_t *mmio = (volatile uint8_t *)mmio_v;
+            volatile uint8_t *base = mmio + offset;
 
             switch (cfg_type) {
             case VIRTIO_PCI_CAP_COMMON_CFG:
@@ -276,7 +292,7 @@ static bool parse_capabilities(pci_device_t *dev)
                 klog("[virtio-gpu] common cfg BAR%u off=0x%x len=0x%x\n", bar, offset, length);
                 break;
             case VIRTIO_PCI_CAP_NOTIFY_CFG:
-                gpu.notify_base = (volatile uint8_t *)bar_addr + offset;
+                gpu.notify_base = mmio + offset;
                 gpu.notify_off_mult = pci_read_config(dev->bus, dev->device, dev->function, (uint8_t)(cap_off + 16));
                 klog("[virtio-gpu] notify BAR%u off=0x%x mult=%u\n", bar, offset, gpu.notify_off_mult);
                 break;
@@ -289,7 +305,10 @@ static bool parse_capabilities(pci_device_t *dev)
             }
         }
 
-        cap_off = pci_read_config8(dev->bus, dev->device, dev->function, cap_off + 1);
+        uint8_t next = pci_read_config8(dev->bus, dev->device, dev->function, cap_off + 1);
+        if (next == cap_off)
+            break;
+        cap_off = next;
     }
 
     return found_common && gpu.notify_base;

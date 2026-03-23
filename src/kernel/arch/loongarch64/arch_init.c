@@ -3,6 +3,7 @@
  */
 #include <aevos/types.h>
 #include "../arch.h"
+#include "../../klog.h"
 
 void arch_early_init(void)  { }
 void arch_enable_irq(void)  {
@@ -25,5 +26,5 @@ void idt_init(void)
 
 void pic_init(void)
 {
-    /* LoongArch uses Extended I/O Interrupt Controller, stub for now */
+    klog("[pic] loongarch64: EIO PIC / LAPIC init deferred\n");
 }

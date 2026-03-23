@@ -6,6 +6,18 @@
 
 coro_t *current_coro = NULL;
 
+static volatile bool sched_cancel_broadcast;
+
+void scheduler_cancel_broadcast_set(bool active)
+{
+    sched_cancel_broadcast = active;
+}
+
+bool scheduler_cancel_requested(void)
+{
+    return sched_cancel_broadcast;
+}
+
 static coro_t *run_queues[CORO_PRIORITY_LEVELS];
 static coro_t  idle_coro;
 static coro_t  coro_pool[MAX_COROUTINES];

@@ -204,3 +204,6 @@ int      net_process_frame(const void *frame, size_t len);
 
 /* PCI detection */
 int      net_detect_pci(void);
+
+/* Poll NIC RX (virtio-net); safe to call every UI frame */
+void     net_poll(void);

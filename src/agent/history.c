@@ -17,6 +17,7 @@ void history_init(history_t *h, uint32_t max_tokens) {
     memset(h, 0, sizeof(*h));
     h->max_tokens = max_tokens;
     h->lock = SPINLOCK_INIT;
+    klog("history: ring buffer active; B+ dual-key + WAL → history_wal / future index\n");
 }
 
 /* Free compressed data owned by an entry */

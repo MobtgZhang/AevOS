@@ -10,6 +10,7 @@
  */
 
 #include <aevos/types.h>
+#include "aevos_wl_protocol.h"
 
 struct ui_shell;
 typedef struct ui_shell ui_shell_t;

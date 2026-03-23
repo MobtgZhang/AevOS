@@ -5,7 +5,10 @@
 #include "lib/string.h"
 
 /*
- * AevOS Database — in-memory fallback with conversation-tree support.
+ * AevOS Database — in-memory conversation tree.
+ *
+ * For on-disk persistence + WAL, build with SQLite amalgamation under
+ * third_party/sqlite3/ (see third_party/sqlite3/README.md) and AEVOS_USE_SQLITE.
  *
  * Each message has a parent_id, forming a tree per session.
  * Walking from any leaf to the root yields one linear conversation path.

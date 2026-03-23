@@ -207,6 +207,8 @@ UI_DIR       := $(SRCDIR)/ui
 POSIX_DIR    := $(SRCDIR)/posix
 LIB_DIR      := $(SRCDIR)/lib
 DB_DIR       := $(SRCDIR)/db
+CONTAINER_DIR := $(SRCDIR)/container
+EVOLUTION_DIR := $(SRCDIR)/evolution
 TOOLS_DIR    := $(SRCDIR)/tools
 
 BUILD_DIR    := build/$(ARCH)
@@ -242,7 +244,9 @@ KERNEL_CSRC := $(wildcard $(KERNEL_DIR)/*.c) \
                $(wildcard $(UI_DIR)/*.c) \
                $(wildcard $(POSIX_DIR)/*.c) \
                $(wildcard $(LIB_DIR)/*.c) \
-               $(wildcard $(DB_DIR)/*.c)
+               $(wildcard $(DB_DIR)/*.c) \
+               $(wildcard $(CONTAINER_DIR)/*.c) \
+               $(wildcard $(EVOLUTION_DIR)/*.c)
 
 KERNEL_ASRC := $(wildcard $(KERNEL_ARCH)/*.S) \
                $(wildcard $(KERNEL_SCHED)/*.S)
@@ -321,7 +325,7 @@ MKFS_AEVOS     := build/mkfs_aevos
 #  Targets
 # ============================================================
 
-.PHONY: all clean dirs boot kernel image tools run info help
+.PHONY: all clean dirs boot kernel image tools run info help devtools-ui
 
 all: dirs boot kernel image
 	@echo ""
@@ -343,6 +347,7 @@ help:
 	@echo "  LoongArch firmware:   AEVOS_LOONGARCH_FW (default: ~/Firmware/LoongArchVirtMachine)"
 	@echo "  MIPS64 firmware:      AEVOS_MIPS64_FW (custom UEFI firmware path)"
 	@echo "  make clean            Remove all build artifacts"
+	@echo "  make devtools-ui      Host TypeScript Cursor 工作台 (Vite, devtools/cursor-workbench)"
 	@echo ""
 
 # ---- Create build directory tree ----
@@ -361,6 +366,8 @@ dirs:
 	@mkdir -p $(BUILD_DIR)/$(POSIX_DIR)
 	@mkdir -p $(BUILD_DIR)/$(LIB_DIR)
 	@mkdir -p $(BUILD_DIR)/$(DB_DIR)
+	@mkdir -p $(BUILD_DIR)/$(CONTAINER_DIR)
+	@mkdir -p $(BUILD_DIR)/$(EVOLUTION_DIR)
 	@mkdir -p $(BUILD_DIR)/$(TOOLS_DIR)
 
 # ============================================================
@@ -422,6 +429,14 @@ $(KERNEL_ELF): $(KERNEL_OBJS)
 	@echo "  Kernel: $@ ($$(stat -c%s $@ 2>/dev/null || stat -f%z $@) bytes)"
 
 # ============================================================
+#  Host: TypeScript IDE shell (Wayland-style protocol demo)
+# ============================================================
+
+devtools-ui:
+	@echo "  Starting cursor-workbench (npm install if needed)…"
+	@cd devtools/cursor-workbench && npm install && npm run dev
+
+# ============================================================
 #  Host tools
 # ============================================================
 
@@ -473,7 +488,8 @@ run: image
 	    -drive format=raw,file=$(DISK_IMAGE) \
 	    -m 4G \
 	    -serial stdio \
-	    -net none \
+	    -netdev user,id=net0 \
+	    -device virtio-net-pci,netdev=net0,disable-legacy=on \
 	    $(QEMU_RUN_DEVS)
 endif
 

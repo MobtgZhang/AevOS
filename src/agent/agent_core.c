@@ -1,4 +1,6 @@
 #include "agent_core.h"
+#include "eventlog.h"
+#include <aevos/llm_syscall.h>
 #include "llm/llm_runtime.h"
 #include "kernel/mm/slab.h"
 #include "kernel/klog.h"
@@ -16,6 +18,8 @@ int agent_system_init(agent_system_t *sys) {
     memset(sys, 0, sizeof(*sys));
     sys->next_id = 1;
     sys->lock = SPINLOCK_INIT;
+    eventlog_init();
+    mailbox_init(&sys->mailbox);
     klog("agent_system: initialized (max=%u)\n", MAX_AGENTS);
     return 0;
 }
@@ -52,11 +56,15 @@ agent_t *agent_create(agent_system_t *sys, const char *name) {
     agent->id = sys->next_id++;
     agent->created_at = timer_get_ms();
     agent->state = AGENT_IDLE;
+    agent->tool_state = AGENT_TOOL_READY;
+    agent->cancel_req = false;
 
     /* Initialize sub-engines */
     history_init(&agent->history, LLM_DEFAULT_CTX);
+    hms_cache_init(&agent->hms, 64);
 
     if (memory_init(&agent->memory) < 0) {
+        hms_cache_destroy(&agent->hms);
         kfree(agent);
         spin_unlock(&sys->lock);
         return NULL;
@@ -70,6 +78,7 @@ agent_t *agent_create(agent_system_t *sys, const char *name) {
     agent->response_buf = (char *)kmalloc(AGENT_RESPONSE_BUF_SIZE);
     if (!agent->response_buf) {
         memory_destroy(&agent->memory);
+        hms_cache_destroy(&agent->hms);
         kfree(agent);
         spin_unlock(&sys->lock);
         return NULL;
@@ -92,6 +101,7 @@ void agent_destroy(agent_system_t *sys, agent_t *agent) {
     history_clear(&agent->history);
     memory_destroy(&agent->memory);
     skill_destroy(&agent->skills);
+    hms_cache_destroy(&agent->hms);
 
     kfree(agent->response_buf);
 
@@ -200,6 +210,7 @@ static int build_prompt(agent_t *agent, char *prompt_buf, size_t prompt_max) {
 
 static int parse_and_execute_tools(agent_t *agent, const char *response,
                                    char *tool_output, size_t tool_max) {
+    agent->tool_state = AGENT_TOOL_READY;
     /* Look for [TOOL:skill_name(args)] patterns */
     const char *p = response;
     int calls = 0;
@@ -235,8 +246,10 @@ static int parse_and_execute_tools(agent_t *agent, const char *response,
         skill_t *skill = skill_find_by_name(&agent->skills, skill_name);
         if (skill) {
             char result[2048];
+            agent->tool_state = AGENT_TOOL_WAIT_IO;
             int rc = skill_execute(&agent->skills, skill->id, args,
                                    result, sizeof(result));
+            agent->tool_state = AGENT_TOOL_READY;
 
             size_t rlen = strlen(result);
             if (out_pos + rlen + 64 < tool_max) {
@@ -264,7 +277,16 @@ static int parse_and_execute_tools(agent_t *agent, const char *response,
 const char *agent_process_input(agent_t *agent, const char *user_text) {
     if (!agent || !user_text) return NULL;
 
+    if (agent->cancel_req) {
+        agent->cancel_req = false;
+        scheduler_cancel_broadcast_set(false);
+        snprintf(agent->response_buf, agent->response_buf_size,
+                 "[Cancelled]");
+        return agent->response_buf;
+    }
+
     agent->state = AGENT_THINKING;
+    eventlog_append(EVLOG_USER_INPUT, agent->id, user_text);
 
     /* Push user input to history */
     history_push(&agent->history, HIST_ROLE_USER, user_text);
@@ -284,8 +306,19 @@ const char *agent_process_input(agent_t *agent, const char *user_text) {
     memset(agent->response_buf, 0, agent->response_buf_size);
 
     if (agent->llm) {
-        int gen = llm_infer(agent->llm, prompt_buf,
-                            agent->response_buf, agent->response_buf_size);
+        agent->tool_state = AGENT_TOOL_WAIT_LLM;
+        eventlog_append(EVLOG_LLM_START, agent->id, NULL);
+        llm_infer_request_t ireq = {
+            .prompt         = prompt_buf,
+            .prefer_remote  = false,
+            .temperature    = 0.8f,
+            .top_p          = 0.9f,
+        };
+        int gen = llm_sys_infer(agent->llm, &ireq,
+                                agent->response_buf, agent->response_buf_size);
+        eventlog_append(EVLOG_LLM_END, agent->id,
+                        gen < 0 ? "err" : "ok");
+        agent->tool_state = AGENT_TOOL_READY;
         if (gen < 0) {
             snprintf(agent->response_buf, agent->response_buf_size,
                      "[LLM inference error: %d]", gen);
@@ -321,6 +354,15 @@ const char *agent_process_input(agent_t *agent, const char *user_text) {
 }
 
 /* ── Periodic maintenance tick ───────────────────────────── */
+
+void agent_cancel_request(agent_t *agent)
+{
+    if (!agent)
+        return;
+    agent->cancel_req = true;
+    scheduler_cancel_broadcast_set(true);
+    eventlog_append(EVLOG_CANCEL, agent->id, NULL);
+}
 
 void agent_tick(agent_t *agent) {
     if (!agent || agent->state != AGENT_IDLE) return;

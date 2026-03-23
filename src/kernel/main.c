@@ -20,11 +20,17 @@
 #include "drivers/virtio_gpu.h"
 #include "locale.h"
 #include "fs/vfs.h"
+#include "fs/procfs.h"
+#include "fs/devfs.h"
 #include "fs/storage_automount.h"
+#include "net/lwip_port.h"
+#include "drivers/virtio_net.h"
 #include <posix/unistd.h>
 #include "sched/coroutine.h"
 #include "../llm/llm_runtime.h"
 #include "../agent/agent_core.h"
+#include "../evolution/evolution_plane.h"
+#include "../container/lc_layer.h"
 #include "../ui/shell.h"
 #include "../ui/font.h"
 #include "../lib/string.h"
@@ -129,6 +135,13 @@ void NORETURN kernel_main(boot_info_t *bi)
     pci_init();
     uint32_t pci_count = pci_get_device_count();
     klog("[pci] %u devices\n", pci_count);
+
+    klog("[net] network stack init\n");
+    net_init();
+    if (virtio_net_init() != 0) {
+        klog("[net] virtio-net not available, PCI scan only\n");
+        net_detect_pci();
+    }
 
     klog("[nvme] probing controllers\n");
     if (nvme_init())
@@ -239,6 +252,8 @@ void NORETURN kernel_main(boot_info_t *bi)
 
     klog("[vfs] VFS init\n");
     vfs_init();
+    procfs_init();
+    devfs_init();
 
     block_storage_register_default();
     storage_automount_all();
@@ -267,6 +282,8 @@ void NORETURN kernel_main(boot_info_t *bi)
 
     klog("[agent] subsystem init\n");
     agent_system_init(&g_agent_sys);
+    evolution_plane_init();
+    lc_layer_init();
     agent_t *default_agent = agent_create(&g_agent_sys, "aevos-default");
     if (default_agent) {
         default_agent->llm = &g_llm_ctx;
@@ -289,7 +306,8 @@ void NORETURN kernel_main(boot_info_t *bi)
     /* Phase 8: Start main loop */
 
     klog("[sched] spawn ui-shell coroutine\n");
-    coro_create("ui-shell", shell_coroutine, &g_shell, 128);
+    if (!coro_create("ui-shell", shell_coroutine, &g_shell, 128))
+        kpanic("ui-shell: coro_create failed (out of memory?) — cannot start desktop\n");
 
     klog("[boot] handoff to scheduler\n");
     klog("===========================================\n\n");

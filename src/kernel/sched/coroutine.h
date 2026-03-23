@@ -39,6 +39,10 @@ void     coro_sleep(uint32_t ms);
 void     coro_exit(void);
 void     scheduler_run(void);
 
+/* Architecture-level cancel flag (checked by long-running coroutines). */
+void     scheduler_cancel_broadcast_set(bool active);
+bool     scheduler_cancel_requested(void);
+
 /* Implemented in arch-specific coro_switch.S */
 extern void coro_switch(uint64_t *old_sp, uint64_t new_sp);
 extern void coro_entry_trampoline(void);

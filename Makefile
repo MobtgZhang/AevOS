@@ -16,6 +16,11 @@ SRCDIR := src
 AEVOS_LOONGARCH_FW ?= /home/mobtgzhang/Firmware/LoongArchVirtMachine
 AEVOS_MIPS64_FW    ?= /home/mobtgzhang/Firmware/Mips64VirtMachine
 
+# 预编译 UEFI 固件目录（与 https://retrage.github.io/edk2-nightly/ 命名一致）。
+# 运行: make fetch-uefi-firmware ARCH=<arch>
+AEVOS_UEFI_FW ?= firmware/uefi
+EDK2_NIGHTLY_BIN := https://retrage.github.io/edk2-nightly/bin
+
 # ============================================================
 #  Architecture-specific configuration
 # ============================================================
@@ -49,9 +54,8 @@ else ifeq ($(ARCH),aarch64)
   QEMU_CMD       := qemu-system-aarch64
   QEMU_EXTRA     := -M virt -cpu cortex-a72 -smp 2 \
                     -device virtio-gpu-pci \
-                    -device nec-usb-xhci,id=xhci \
-                    -device usb-tablet,bus=xhci.0,port=1 \
-                    -device usb-kbd,bus=xhci.0,port=2
+                    -device virtio-keyboard-pci \
+                    -device virtio-mouse-pci
   QEMU_RUN_DEVS  :=
 
 else ifeq ($(ARCH),riscv64)
@@ -59,15 +63,19 @@ else ifeq ($(ARCH),riscv64)
   CROSS_PREFIX2  := riscv64-linux-gnu-
   ARCH_SUBDIR    := riscv64
   KCFLAGS_ARCH   := -march=rv64gc -mabi=lp64d -mcmodel=medany
-  BOOT_CFLAGS_ARCH :=
+  # PE/COFF EFI .so 链接需要 PIC，否则 HI20 重定位在 -shared 下失败
+  BOOT_CFLAGS_ARCH := -fPIC
   KERNEL_LDS     := $(SRCDIR)/kernel/arch/riscv64/kernel.lds
   BOOT_LDS       := $(SRCDIR)/boot/linker_boot.lds
   EFI_TARGET_FMT := efi-app-riscv64
   EFI_BOOT_NAME  := BOOTRISCV64.EFI
   BOOT_ELF_FMT   := elf64-littleriscv
   QEMU_CMD       := qemu-system-riscv64
-  QEMU_EXTRA     := -M virt
-  QEMU_RUN_DEVS  := -device usb-ehci -device usb-mouse
+  QEMU_EXTRA     := -M virt -smp 2 \
+                    -device virtio-gpu-pci \
+                    -device virtio-keyboard-pci \
+                    -device virtio-mouse-pci
+  QEMU_RUN_DEVS  :=
 
 else ifeq ($(ARCH),loongarch64)
   CROSS_PREFIX   := loongarch64-unknown-linux-gnu-
@@ -83,9 +91,8 @@ else ifeq ($(ARCH),loongarch64)
   QEMU_CMD       := qemu-system-loongarch64
   QEMU_EXTRA     := -M virt -cpu la464 -smp 2 \
                     -device virtio-gpu-pci \
-                    -device nec-usb-xhci,id=xhci \
-                    -device usb-tablet,bus=xhci.0,port=1 \
-                    -device usb-kbd,bus=xhci.0,port=2
+                    -device virtio-keyboard-pci \
+                    -device virtio-mouse-pci
   QEMU_RUN_DEVS  :=
 
 else ifeq ($(ARCH),mips64el)
@@ -102,9 +109,8 @@ else ifeq ($(ARCH),mips64el)
   QEMU_CMD       := qemu-system-mips64el
   QEMU_EXTRA     := -M malta -cpu MIPS64R2-generic \
                     -device virtio-gpu-pci \
-                    -device nec-usb-xhci,id=xhci \
-                    -device usb-tablet,bus=xhci.0,port=1 \
-                    -device usb-kbd,bus=xhci.0,port=2
+                    -device virtio-keyboard-pci \
+                    -device virtio-mouse-pci
   QEMU_RUN_DEVS  :=
 
 else
@@ -261,29 +267,36 @@ BOOT_SO     := $(BUILD_DIR)/aevos_boot.so
 KERNEL_ELF  := $(BUILD_DIR)/kernel.elf
 DISK_IMAGE  := $(BUILD_DIR)/aevos.img
 
+# RISC-V virt + EDK2：默认启动项常为 PXE；virtio-blk + bootindex 优先从 ESP 加载 BOOTRISCV64.EFI
+QEMU_DISK_ARGS := -drive format=raw,file=$(DISK_IMAGE)
+ifeq ($(ARCH),riscv64)
+  QEMU_DISK_ARGS := -drive if=none,format=raw,id=aevosdisk,file=$(DISK_IMAGE) \
+                    -device virtio-blk-pci,drive=aevosdisk,bootindex=1
+endif
+
 OVMF_VARS_WORK := $(BUILD_DIR)/ovmf_vars.fd
 
-# UEFI pflash firmware paths
+# UEFI pflash firmware paths（优先 AEVOS_UEFI_FW 下 edk2-nightly 文件名）
 ifeq ($(ARCH),x86_64)
-  OVMF_CODE := $(firstword $(foreach f,/usr/share/OVMF/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF.fd /usr/share/ovmf/OVMF.fd /usr/share/qemu/OVMF.fd,$(if $(wildcard $(f)),$(f),)))
+  OVMF_CODE := $(firstword $(foreach f,$(AEVOS_UEFI_FW)/DEBUGX64_OVMF_CODE.fd $(AEVOS_UEFI_FW)/RELEASEX64_OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF.fd /usr/share/ovmf/OVMF.fd /usr/share/qemu/OVMF.fd,$(if $(wildcard $(f)),$(f),)))
   ifneq ($(findstring 4M,$(notdir $(OVMF_CODE))),)
     OVMF_VARS_SRC := $(firstword $(foreach f,/usr/share/OVMF/OVMF_VARS_4M.fd,$(if $(wildcard $(f)),$(f),)))
   else ifneq ($(OVMF_CODE),)
-    OVMF_VARS_SRC := $(firstword $(foreach f,/usr/share/OVMF/OVMF_VARS.fd,$(if $(wildcard $(f)),$(f),)))
+    OVMF_VARS_SRC := $(firstword $(foreach f,$(AEVOS_UEFI_FW)/DEBUGX64_OVMF_VARS.fd $(AEVOS_UEFI_FW)/RELEASEX64_OVMF_VARS.fd /usr/share/OVMF/OVMF_VARS.fd,$(if $(wildcard $(f)),$(f),)))
   endif
 else ifeq ($(ARCH),aarch64)
-  OVMF_CODE := $(firstword $(foreach f,/usr/share/AAVMF/AAVMF_CODE.fd /usr/share/edk2/aarch64/QEMU_EFI.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd,$(if $(wildcard $(f)),$(f),)))
-  OVMF_VARS_SRC := $(firstword $(foreach f,/usr/share/AAVMF/AAVMF_VARS.fd /usr/share/edk2/aarch64/vars-template-pflash.raw,$(if $(wildcard $(f)),$(f),)))
+  OVMF_CODE := $(firstword $(foreach f,$(AEVOS_UEFI_FW)/DEBUGAARCH64_QEMU_EFI.fd $(AEVOS_UEFI_FW)/RELEASEAARCH64_QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd /usr/share/edk2/aarch64/QEMU_EFI.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd,$(if $(wildcard $(f)),$(f),)))
+  OVMF_VARS_SRC := $(firstword $(foreach f,$(AEVOS_UEFI_FW)/DEBUGAARCH64_QEMU_VARS.fd $(AEVOS_UEFI_FW)/RELEASEAARCH64_QEMU_VARS.fd /usr/share/AAVMF/AAVMF_VARS.fd /usr/share/edk2/aarch64/vars-template-pflash.raw,$(if $(wildcard $(f)),$(f),)))
 else ifeq ($(ARCH),riscv64)
-  OVMF_CODE := $(firstword $(foreach f,/usr/share/OVMF/OVMF_CODE_RISCV64.fd /usr/share/qemu/firmware/edk2-riscv64-code.fd,$(if $(wildcard $(f)),$(f),)))
-  OVMF_VARS_SRC := $(firstword $(foreach f,/usr/share/OVMF/OVMF_VARS_RISCV64.fd /usr/share/qemu/firmware/edk2-riscv64-vars.fd,$(if $(wildcard $(f)),$(f),)))
+  OVMF_CODE := $(firstword $(foreach f,/usr/share/qemu-efi-riscv64/RISCV_VIRT_CODE.fd $(AEVOS_UEFI_FW)/DEBUGRISCV64_VIRT.fd $(AEVOS_UEFI_FW)/RELEASERISCV64_VIRT.fd /usr/share/OVMF/OVMF_CODE_RISCV64.fd /usr/share/qemu/firmware/edk2-riscv64-code.fd,$(if $(wildcard $(f)),$(f),)))
+  OVMF_VARS_SRC := $(firstword $(foreach f,/usr/share/qemu-efi-riscv64/RISCV_VIRT_VARS.fd /usr/share/OVMF/OVMF_VARS_RISCV64.fd /usr/share/qemu/firmware/edk2-riscv64-vars.fd,$(if $(wildcard $(f)),$(f),)))
 else ifeq ($(ARCH),loongarch64)
   ifneq ($(wildcard $(AEVOS_LOONGARCH_FW)/QEMU_EFI.fd),)
     OVMF_CODE := $(AEVOS_LOONGARCH_FW)/QEMU_EFI.fd
     OVMF_VARS_SRC := $(AEVOS_LOONGARCH_FW)/QEMU_VARS.fd
   else
-    OVMF_CODE := $(firstword $(foreach f,/usr/share/OVMF/OVMF_CODE_LOONGARCH64.fd /usr/share/edk2/loongarch64/QEMU_EFI.fd,$(if $(wildcard $(f)),$(f),)))
-    OVMF_VARS_SRC := $(firstword $(foreach f,/usr/share/OVMF/OVMF_VARS_LOONGARCH64.fd /usr/share/edk2/loongarch64/QEMU_VARS.fd,$(if $(wildcard $(f)),$(f),)))
+    OVMF_CODE := $(firstword $(foreach f,$(AEVOS_UEFI_FW)/DEBUGLOONGARCH64_QEMU_EFI.fd $(AEVOS_UEFI_FW)/RELEASELOONGARCH64_QEMU_EFI.fd /usr/share/OVMF/OVMF_CODE_LOONGARCH64.fd /usr/share/edk2/loongarch64/QEMU_EFI.fd,$(if $(wildcard $(f)),$(f),)))
+    OVMF_VARS_SRC := $(firstword $(foreach f,$(AEVOS_UEFI_FW)/DEBUGLOONGARCH64_QEMU_VARS.fd $(AEVOS_UEFI_FW)/RELEASELOONGARCH64_QEMU_VARS.fd /usr/share/OVMF/OVMF_VARS_LOONGARCH64.fd /usr/share/edk2/loongarch64/QEMU_VARS.fd,$(if $(wildcard $(f)),$(f),)))
   endif
 else ifeq ($(ARCH),mips64el)
   OVMF_CODE := $(firstword $(foreach f,$(AEVOS_MIPS64_FW)/QEMU_EFI.fd /usr/share/edk2/mips64el/QEMU_EFI.fd,$(if $(wildcard $(f)),$(f),)))
@@ -325,7 +338,7 @@ MKFS_AEVOS     := build/mkfs_aevos
 #  Targets
 # ============================================================
 
-.PHONY: all clean dirs boot kernel image tools run info help devtools-ui
+.PHONY: all clean dirs boot kernel image tools run info help devtools-ui fetch-uefi-firmware
 
 all: dirs boot kernel image
 	@echo ""
@@ -347,8 +360,32 @@ help:
 	@echo "  LoongArch firmware:   AEVOS_LOONGARCH_FW (default: ~/Firmware/LoongArchVirtMachine)"
 	@echo "  MIPS64 firmware:      AEVOS_MIPS64_FW (custom UEFI firmware path)"
 	@echo "  make clean            Remove all build artifacts"
+	@echo "  make fetch-uefi-firmware  从 edk2-nightly 拉取当前 ARCH 的 QEMU UEFI 固件到 AEVOS_UEFI_FW"
 	@echo "  make devtools-ui      Host TypeScript Cursor 工作台 (Vite, devtools/cursor-workbench)"
 	@echo ""
+
+# ---- Download UEFI images matching edk2-nightly filenames (DEBUG) ----
+fetch-uefi-firmware:
+	@echo "  FETCH UEFI [$(ARCH)] -> $(AEVOS_UEFI_FW)  ($(EDK2_NIGHTLY_BIN))"
+	@mkdir -p $(AEVOS_UEFI_FW)
+ifeq ($(ARCH),x86_64)
+	@curl -fL --retry 3 -o $(AEVOS_UEFI_FW)/DEBUGX64_OVMF_CODE.fd $(EDK2_NIGHTLY_BIN)/DEBUGX64_OVMF_CODE.fd
+	@curl -fL --retry 3 -o $(AEVOS_UEFI_FW)/DEBUGX64_OVMF_VARS.fd $(EDK2_NIGHTLY_BIN)/DEBUGX64_OVMF_VARS.fd
+else ifeq ($(ARCH),aarch64)
+	@curl -fL --retry 3 -o $(AEVOS_UEFI_FW)/DEBUGAARCH64_QEMU_EFI.fd $(EDK2_NIGHTLY_BIN)/DEBUGAARCH64_QEMU_EFI.fd
+	@curl -fL --retry 3 -o $(AEVOS_UEFI_FW)/DEBUGAARCH64_QEMU_VARS.fd $(EDK2_NIGHTLY_BIN)/DEBUGAARCH64_QEMU_VARS.fd
+else ifeq ($(ARCH),riscv64)
+	@curl -fL --retry 3 -o $(AEVOS_UEFI_FW)/DEBUGRISCV64_VIRT.fd $(EDK2_NIGHTLY_BIN)/DEBUGRISCV64_VIRT.fd
+else ifeq ($(ARCH),loongarch64)
+	@curl -fL --retry 3 -o $(AEVOS_UEFI_FW)/DEBUGLOONGARCH64_QEMU_EFI.fd $(EDK2_NIGHTLY_BIN)/DEBUGLOONGARCH64_QEMU_EFI.fd
+	@curl -fL --retry 3 -o $(AEVOS_UEFI_FW)/DEBUGLOONGARCH64_QEMU_VARS.fd $(EDK2_NIGHTLY_BIN)/DEBUGLOONGARCH64_QEMU_VARS.fd
+else ifeq ($(ARCH),mips64el)
+	@echo "  ERROR: edk2-nightly 未提供 mips64el 固件；请使用 AEVOS_MIPS64_FW 或发行版 QEMU 固件。"
+	@false
+else
+	$(error fetch-uefi-firmware: unsupported ARCH=$(ARCH))
+endif
+	@echo "  Done."
 
 # ---- Create build directory tree ----
 dirs:
@@ -421,6 +458,11 @@ $(BUILD_DIR)/$(LLM_DIR)/simd_kernels.o: $(LLM_DIR)/simd_kernels.c
 	@echo "  CC  [simd/$(ARCH)]  $<"
 	@$(CC) $(KCFLAGS) -msse2 -mavx2 -mfma -c $< -o $@ 2>/dev/null || \
 	 $(CC) $(KCFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/$(LLM_DIR)/quantize.o: $(LLM_DIR)/quantize.c
+	@echo "  CC  [simd/$(ARCH)]  $<"
+	@$(CC) $(KCFLAGS) -msse2 -mavx2 -mfma -c $< -o $@ 2>/dev/null || \
+	 $(CC) $(KCFLAGS) -c $< -o $@
 endif
 
 $(KERNEL_ELF): $(KERNEL_OBJS)
@@ -485,7 +527,7 @@ run: image
 	$(QEMU_CMD) \
 	    $(QEMU_EXTRA) \
 	    $(QEMU_FIRMWARE) \
-	    -drive format=raw,file=$(DISK_IMAGE) \
+	    $(QEMU_DISK_ARGS) \
 	    -m 4G \
 	    -serial stdio \
 	    -netdev user,id=net0 \
@@ -510,6 +552,7 @@ info:
 	@echo "Toolchain:      $(CC)"
 	@echo "Source dir:     $(SRCDIR)"
 	@echo "Kernel LDS:     $(KERNEL_LDS)"
+	@echo "AEVOS_UEFI_FW:  $(AEVOS_UEFI_FW)  (see https://retrage.github.io/edk2-nightly/)"
 	@echo "AEVOS_LOONGARCH_FW: $(AEVOS_LOONGARCH_FW)"
 	@echo "OVMF_CODE:      $(OVMF_CODE)"
 	@echo "OVMF_VARS_SRC:  $(OVMF_VARS_SRC)"

@@ -20,15 +20,24 @@ static inline void arch_panic_stop(void){ __asm__ volatile("cli; hlt"); }
 
 #elif defined(__aarch64__)
 
+/*
+ * GIC + CNTP PPI is not wired yet (see arch_init pic_init).  WFI would block
+ * forever with IRQs never asserted; use YIELD so the scheduler / UI loop keep
+ * making progress under QEMU virt until timer delivery is enabled.
+ */
 static inline void arch_halt(void)      { __asm__ volatile("wfi"); }
-static inline void arch_idle(void)      { __asm__ volatile("wfi"); }
+static inline void arch_idle(void)      { __asm__ volatile("yield" ::: "memory"); }
 static inline void arch_spin_hint(void) { __asm__ volatile("yield"); }
 static inline void arch_panic_stop(void){ __asm__ volatile("msr daifset, #15\n\twfi"); }
 
 #elif defined(__riscv)
 
+/*
+ * PLIC / S 级定时器尚未接好（见 arch_init pic_init）；WFI 可能永远等不到中断。
+ * 使用轻量 nop 让调度器与 UI 主循环在 QEMU virt 上能推进。
+ */
 static inline void arch_halt(void)      { __asm__ volatile("wfi"); }
-static inline void arch_idle(void)      { __asm__ volatile("wfi"); }
+static inline void arch_idle(void)      { __asm__ volatile("nop" ::: "memory"); }
 static inline void arch_spin_hint(void) { __asm__ volatile("nop"); }
 static inline void arch_panic_stop(void){ __asm__ volatile("csrci mstatus, 8\n\twfi"); }
 
@@ -38,18 +47,6 @@ static inline void arch_halt(void)      { __asm__ volatile("idle 0"); }
 static inline void arch_idle(void)      { __asm__ volatile("idle 0"); }
 static inline void arch_spin_hint(void) { __asm__ volatile("nop"); }
 static inline void arch_panic_stop(void){ __asm__ volatile("idle 0"); }
-
-#elif defined(__mips64)
-
-static inline void arch_halt(void)      { __asm__ volatile("wait"); }
-static inline void arch_idle(void)      { __asm__ volatile("wait"); }
-static inline void arch_spin_hint(void) { __asm__ volatile("nop"); }
-static inline void arch_panic_stop(void){
-    uint32_t sr;
-    __asm__ volatile("mfc0 %0, $12" : "=r"(sr));
-    sr &= ~0x1u;
-    __asm__ volatile("mtc0 %0, $12\n\twait" : : "r"(sr));
-}
 
 #else
 #error "Unsupported architecture"

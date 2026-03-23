@@ -10,6 +10,9 @@
 
 #define ETH_TYPE_ARP   0x0806
 #define ETH_TYPE_IPV4  0x0800
+#define ETH_TYPE_IPV6  0x86DD
+
+#define IPV6_ADDR_LEN  16
 
 typedef struct PACKED {
     uint8_t  dst[ETH_ADDR_LEN];
@@ -47,6 +50,17 @@ typedef struct {
 #define IP_PROTO_ICMP  1
 #define IP_PROTO_TCP   6
 #define IP_PROTO_UDP   17
+
+#define ICMP_ECHO       8
+#define ICMP_ECHOREPLY  0
+
+typedef struct PACKED {
+    uint8_t  type;
+    uint8_t  code;
+    uint16_t checksum;
+    uint16_t identifier;
+    uint16_t sequence;
+} icmp_echo_header_t;
 
 typedef struct PACKED {
     uint8_t  ver_ihl;
@@ -141,13 +155,19 @@ typedef ssize_t (*net_send_fn)(const void *data, size_t len);
 typedef ssize_t (*net_recv_fn)(void *data, size_t max_len);
 
 typedef struct {
+    uint8_t  b[IPV6_ADDR_LEN];
+} ipv6_addr_t;
+
+typedef struct {
     uint8_t    mac[ETH_ADDR_LEN];
     uint32_t   ip;
     uint32_t   netmask;
     uint32_t   gateway;
+    uint32_t   dns4; /* e.g. QEMU user-net DNS 10.0.2.3 */
     bool       is_up;
     net_send_fn send_raw;
     net_recv_fn recv_raw;
+    ipv6_addr_t ipv6_link_local; /* fe80::/64 derived from MAC */
 } net_interface_t;
 
 typedef struct {
@@ -207,3 +227,30 @@ int      net_detect_pci(void);
 
 /* Poll NIC RX (virtio-net); safe to call every UI frame */
 void     net_poll(void);
+
+/* Parse dotted IPv4 into host-order address (e.g. "10.0.2.2") */
+int      net_parse_ipv4(const char *s, uint32_t *ip_out);
+
+/* Parse IPv6 text (::1, fe80::1, 2001:db8::1, compressed). */
+int      net_parse_ipv6(const char *s, ipv6_addr_t *out);
+
+/* Fill iface->ipv6_link_local from MAC (RFC 4862 EUI-64 style). */
+void     net_iface_ipv6_linklocal_from_mac(net_interface_t *iface);
+
+uint32_t net_ipv4_dns_server(void);
+int      net_wait_arp_ipv4(uint32_t ipv4, uint32_t timeout_ms);
+
+/*
+ * Send one ICMP echo request and wait for reply (polls net internally).
+ * Returns 0 and sets *rtt_ms_out on success; negative errno on failure.
+ */
+int      icmp_ping(uint32_t dst_ip, uint32_t timeout_ms, uint32_t *rtt_ms_out);
+
+/*
+ * ICMPv6 echo to dst. Link-local uses NDP; global/ULA uses IPv4 gateway MAC
+ * as L2 next hop (common dual-stack home / QEMU setup).
+ */
+int      icmp6_ping(const ipv6_addr_t *dst, uint32_t timeout_ms, uint32_t *rtt_ms_out);
+
+/* Format IPv6 for display (compact where possible). */
+void     net_format_ipv6(const ipv6_addr_t *a, char *buf, size_t cap);

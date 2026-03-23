@@ -4,16 +4,15 @@
 
 ---
 
-## 架构（L0–L6 + LC）
+## 架构（L0–L4）
 
-| 层 | 内容 |
-|----|------|
-| **L6** | Shell：侧栏、聊天（流式 `chat_view_append_stream_chunk`）、终端、`ws_bridge` 占位 |
-| **L5** | 自进化平面：`src/evolution/`（Planner/Corrector/Verifier/Evolver 脚手架） |
-| **L4** | Agent 运行时：`EventLog`、`mailbox`、四态 `tool_state`、`scheduler_cancel_*` |
-| **L3** | HMS：History / Memory / Skill + `hms_cache`（L1 CLOCK 风格） |
-| **LC** | 容器兼容层：`src/container/`（沙箱/IFC/Linux 子系统/OCI 脚手架） |
-| **L2** | LLM：`llm_syscall` 统一入口；远程 OpenAI 兼容路径见 `llm_api_client.c`（待 TCP/HTTP） |
+与 `ideas/ideas2.md` 一致：**L2** 为 AI 基础设施层，含 **LLM / LC / HMS** 三柱；**L3** 为 Agent 层，含 **Agent Runtime** 与 **Self-Evolution** 两列；**L4** 为 Shell。
+
+| OS 层 | 内容 |
+|--------|------|
+| **L4** | Shell：侧栏、聊天（流式 `chat_view_append_stream_chunk`）、终端、`ws_bridge` 占位 |
+| **L3** | Agent 层：左列 `EventLog`、`mailbox`、四态 `tool_state`、`scheduler_cancel_*`；右列 `src/evolution/`（Planner/Corrector/Verifier/Evolver 脚手架） |
+| **L2** | AI 基础设施：**LLM**（`llm_syscall`、`llm_api_client`）· **LC**（`src/container/`）· **HMS**（History/Memory/Skill、`hms_cache` 语义缓存 C1–C3） |
 | **L1** | 微内核：PMM/VMM、协程、VFS（含 **`/proc` `procfs`**、**`/dev` `devfs`**）、**virtio-net** |
 | **L0** | UEFI：读取 **`EFI\AevOS\boot.json`** 覆盖默认启动配置 |
 
@@ -21,7 +20,7 @@
 
 ## 构建与运行
 
-支持的 **`ARCH`**：`x86_64`、`aarch64`、`riscv64`、`loongarch64`、**`mips64el`**（`mips64el` 为 `-kernel` 直启路径）。
+支持的 **`ARCH`**：`x86_64`、`aarch64`、`riscv64`、`loongarch64`。
 
 ```bash
 make
@@ -49,5 +48,6 @@ QEMU 默认附带 **virtio-net-pci** + **user** 网桥（见根目录 `Makefile`
 
 ## 更多
 
-- [架构说明](architecture.md) · [HMS](hms.md) · [LC 层](container.md) · [自进化](evolution.md) · [LLM Syscall](llm-syscall.md)
+各专题文档已展开为**分层结构、算法与边界**（融合 `ideas/` 中的设计与路线图），并尽量对应到 `src/` 源码路径：[架构说明](architecture.md)、[HMS](hms.md)、[LC 层](container.md)、[自进化](evolution.md)、[LLM Syscall](llm-syscall.md)。
+
 - English: [Documentation in English](../en/README.md)

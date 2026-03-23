@@ -5,6 +5,8 @@
 
 ## Topic guides
 
+Each topic file explains **layer structure, algorithms, and boundaries** (including roadmap items from `ideas/`) and points to **source files** where relevant. **OS layers are L0–L4** per `ideas/ideas2.md` (L2 = LLM + LC + HMS; L3 = agent runtime + self-evolution; L4 = shell). `ideas/` is design reference; you may remove it locally after reading—canonical long-form text lives here.
+
 | Topic | English | 中文 |
 |-------|---------|------|
 | Architecture | [architecture.md](en/architecture.md) | [architecture.md](zh/architecture.md) |

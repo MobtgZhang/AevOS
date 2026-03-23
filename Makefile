@@ -2,10 +2,9 @@
 #  AevOS — Autonomous Evolving OS
 #  Multi-Architecture Makefile (UEFI boot, C17)
 #
-#  Supported: ARCH = x86_64 | aarch64 | riscv64 | loongarch64 | mips64el
+#  Supported: ARCH = x86_64 | aarch64 | riscv64 | loongarch64
 #  Usage:     make ARCH=x86_64
 #             make ARCH=aarch64
-#             make ARCH=mips64el
 #             make clean
 # ============================================================
 
@@ -14,7 +13,6 @@ SRCDIR := src
 
 # LoongArch Virt EDK2 (optional; override if firmware lives elsewhere)
 AEVOS_LOONGARCH_FW ?= /home/mobtgzhang/Firmware/LoongArchVirtMachine
-AEVOS_MIPS64_FW    ?= /home/mobtgzhang/Firmware/Mips64VirtMachine
 
 # 预编译 UEFI 固件目录（与 https://retrage.github.io/edk2-nightly/ 命名一致）。
 # 运行: make fetch-uefi-firmware ARCH=<arch>
@@ -71,7 +69,7 @@ else ifeq ($(ARCH),riscv64)
   EFI_BOOT_NAME  := BOOTRISCV64.EFI
   BOOT_ELF_FMT   := elf64-littleriscv
   QEMU_CMD       := qemu-system-riscv64
-  QEMU_EXTRA     := -M virt -smp 2 \
+  QEMU_EXTRA     := -M virt -smp 1 \
                     -device virtio-gpu-pci \
                     -device virtio-keyboard-pci \
                     -device virtio-mouse-pci
@@ -95,26 +93,8 @@ else ifeq ($(ARCH),loongarch64)
                     -device virtio-mouse-pci
   QEMU_RUN_DEVS  :=
 
-else ifeq ($(ARCH),mips64el)
-  CROSS_PREFIX   := mips64el-linux-gnuabi64-
-  CROSS_PREFIX2  := mips64el-linux-gnu-
-  ARCH_SUBDIR    := mips64el
-  KCFLAGS_ARCH   := -mips64r2 -mabi=64 -EL -mno-abicalls -fno-pic -G0
-  BOOT_CFLAGS_ARCH := -mips64r2 -mabi=64 -EL -G0
-  KERNEL_LDS     := $(SRCDIR)/kernel/arch/mips64el/kernel.lds
-  BOOT_LDS       := $(SRCDIR)/boot/linker_boot.lds
-  EFI_TARGET_FMT := elf64-tradlittlemips
-  EFI_BOOT_NAME  := BOOTMIPS64.EFI
-  BOOT_ELF_FMT   := elf64-tradlittlemips
-  QEMU_CMD       := qemu-system-mips64el
-  QEMU_EXTRA     := -M malta -cpu MIPS64R2-generic \
-                    -device virtio-gpu-pci \
-                    -device virtio-keyboard-pci \
-                    -device virtio-mouse-pci
-  QEMU_RUN_DEVS  :=
-
 else
-  $(error Unsupported ARCH=$(ARCH). Choose: x86_64, aarch64, riscv64, loongarch64, mips64el)
+  $(error Unsupported ARCH=$(ARCH). Choose: x86_64, aarch64, riscv64, loongarch64)
 endif
 
 # ---- Toolchain (try bare-metal, then linux-gnu, then host) ----
@@ -165,12 +145,6 @@ GNUEFI_INC   := /usr/include/efi
 GNUEFI_CRT0  := $(GNUEFI_DIR)/crt0-efi-x86_64.o
 
 ifeq ($(ARCH),x86_64)
-BOOT_CFLAGS := -std=c17 -Wall -Wextra -O2 \
-               -ffreestanding -fno-stack-protector \
-               -fpic -fshort-wchar \
-               -I$(SRCDIR)/include \
-               $(BOOT_CFLAGS_ARCH)
-else ifeq ($(ARCH),mips64el)
 BOOT_CFLAGS := -std=c17 -Wall -Wextra -O2 \
                -ffreestanding -fno-stack-protector \
                -fpic -fshort-wchar \
@@ -298,9 +272,6 @@ else ifeq ($(ARCH),loongarch64)
     OVMF_CODE := $(firstword $(foreach f,$(AEVOS_UEFI_FW)/DEBUGLOONGARCH64_QEMU_EFI.fd $(AEVOS_UEFI_FW)/RELEASELOONGARCH64_QEMU_EFI.fd /usr/share/OVMF/OVMF_CODE_LOONGARCH64.fd /usr/share/edk2/loongarch64/QEMU_EFI.fd,$(if $(wildcard $(f)),$(f),)))
     OVMF_VARS_SRC := $(firstword $(foreach f,$(AEVOS_UEFI_FW)/DEBUGLOONGARCH64_QEMU_VARS.fd $(AEVOS_UEFI_FW)/RELEASELOONGARCH64_QEMU_VARS.fd /usr/share/OVMF/OVMF_VARS_LOONGARCH64.fd /usr/share/edk2/loongarch64/QEMU_VARS.fd,$(if $(wildcard $(f)),$(f),)))
   endif
-else ifeq ($(ARCH),mips64el)
-  OVMF_CODE := $(firstword $(foreach f,$(AEVOS_MIPS64_FW)/QEMU_EFI.fd /usr/share/edk2/mips64el/QEMU_EFI.fd,$(if $(wildcard $(f)),$(f),)))
-  OVMF_VARS_SRC := $(firstword $(foreach f,$(AEVOS_MIPS64_FW)/QEMU_VARS.fd /usr/share/edk2/mips64el/QEMU_VARS.fd,$(if $(wildcard $(f)),$(f),)))
 endif
 
 OVMF_IS_COMBINED := $(if $(findstring OVMF.fd,$(notdir $(OVMF_CODE))),$(if $(findstring CODE,$(notdir $(OVMF_CODE))),,yes),)
@@ -318,13 +289,8 @@ else
   QEMU_FIRMWARE :=
 endif
 
-# LoongArch / MIPS64 virt uses -bios
+# LoongArch virt uses -bios
 ifeq ($(ARCH),loongarch64)
-  ifneq ($(OVMF_CODE),)
-    QEMU_FIRMWARE := -bios $(OVMF_CODE)
-  endif
-endif
-ifeq ($(ARCH),mips64el)
   ifneq ($(OVMF_CODE),)
     QEMU_FIRMWARE := -bios $(OVMF_CODE)
   endif
@@ -355,10 +321,8 @@ help:
 	@echo "  make ARCH=aarch64     Build for ARM64"
 	@echo "  make ARCH=riscv64     Build for RISC-V 64"
 	@echo "  make ARCH=loongarch64 Build for LoongArch 64"
-	@echo "  make ARCH=mips64el   Build for MIPS64 EL"
 	@echo "  make run              Build and run in QEMU (current ARCH)"
 	@echo "  LoongArch firmware:   AEVOS_LOONGARCH_FW (default: ~/Firmware/LoongArchVirtMachine)"
-	@echo "  MIPS64 firmware:      AEVOS_MIPS64_FW (custom UEFI firmware path)"
 	@echo "  make clean            Remove all build artifacts"
 	@echo "  make fetch-uefi-firmware  从 edk2-nightly 拉取当前 ARCH 的 QEMU UEFI 固件到 AEVOS_UEFI_FW"
 	@echo "  make devtools-ui      Host TypeScript Cursor 工作台 (Vite, devtools/cursor-workbench)"
@@ -379,9 +343,6 @@ else ifeq ($(ARCH),riscv64)
 else ifeq ($(ARCH),loongarch64)
 	@curl -fL --retry 3 -o $(AEVOS_UEFI_FW)/DEBUGLOONGARCH64_QEMU_EFI.fd $(EDK2_NIGHTLY_BIN)/DEBUGLOONGARCH64_QEMU_EFI.fd
 	@curl -fL --retry 3 -o $(AEVOS_UEFI_FW)/DEBUGLOONGARCH64_QEMU_VARS.fd $(EDK2_NIGHTLY_BIN)/DEBUGLOONGARCH64_QEMU_VARS.fd
-else ifeq ($(ARCH),mips64el)
-	@echo "  ERROR: edk2-nightly 未提供 mips64el 固件；请使用 AEVOS_MIPS64_FW 或发行版 QEMU 固件。"
-	@false
 else
 	$(error fetch-uefi-firmware: unsupported ARCH=$(ARCH))
 endif
@@ -510,16 +471,6 @@ image: boot kernel
 #  Run in QEMU
 # ============================================================
 
-ifeq ($(ARCH),mips64el)
-run: kernel
-	@echo "  QEMU [$(ARCH)]  $(KERNEL_ELF) (direct -kernel boot)"
-	$(QEMU_CMD) \
-	    $(QEMU_EXTRA) \
-	    -kernel $(KERNEL_ELF) \
-	    -m 256 \
-	    -net none \
-	    -nographic
-else
 run: image
 	@echo "  QEMU [$(ARCH)]  $(DISK_IMAGE)"
 	@test -n "$(OVMF_CODE)" || (echo "  ERROR: UEFI firmware not found for $(ARCH). Install ovmf." && false)
@@ -533,7 +484,6 @@ run: image
 	    -netdev user,id=net0 \
 	    -device virtio-net-pci,netdev=net0,disable-legacy=on \
 	    $(QEMU_RUN_DEVS)
-endif
 
 # ============================================================
 #  Clean

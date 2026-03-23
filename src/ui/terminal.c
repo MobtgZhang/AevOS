@@ -9,6 +9,8 @@
 #include "../llm/llm_runtime.h"
 #include "../lib/string.h"
 #include "../container/lc_layer.h"
+#include "../kernel/net/lwip_port.h"
+#include "../kernel/net/dns.h"
 #include <aevos/config.h>
 
 /* Ubuntu/GNOME Terminal default palette (purple field, green user@host, blue path). */
@@ -775,6 +777,8 @@ static void cmd_help(terminal_t *term)
     terminal_print(term, "  llm load <path>    - Load model from VFS path");
     terminal_print(term, "  llm unload         - Release model (stub only)");
     terminal_print(term, "  docker ...         - LC layer: docker CLI subset (OCI shim)");
+    terminal_print(term, "  ping <host>        - ICMP echo (IPv4 / DNS / IPv6)");
+    terminal_print(term, "  ping6 <ipv6>       - ICMPv6 echo (link-local or via gw MAC)");
 }
 
 static void cmd_sysinfo(terminal_t *term)
@@ -1048,6 +1052,92 @@ static void cmd_llm(terminal_t *term, const char *args)
     terminal_print(term, "Usage: llm [status|load <path>|unload]");
 }
 
+static void cmd_ping(terminal_t *term, const char *args)
+{
+    const char *a = skip_ws(args);
+    if (*a == '\0' || str_starts_with(a, "help") || str_starts_with(a, "--help")) {
+        terminal_print(term, "Usage: ping <host>");
+        terminal_print(term, "  host: IPv4, IPv6 literal, or DNS name (A then AAAA).");
+        terminal_print(term, "  Timeout 4s DNS + 3s echo.");
+        return;
+    }
+
+    char host[128];
+    size_t hi = 0;
+    while (a[hi] && a[hi] != ' ' && a[hi] != '\t' && hi + 1 < sizeof(host))
+        hi++;
+    memcpy(host, a, hi);
+    host[hi] = '\0';
+
+    uint32_t    ip  = 0;
+    ipv6_addr_t ip6;
+    memset(&ip6, 0, sizeof(ip6));
+    bool        use_v6 = false;
+
+    if (net_parse_ipv4(host, &ip) == 0) {
+        use_v6 = false;
+    } else if (net_parse_ipv6(host, &ip6) == 0) {
+        use_v6 = true;
+    } else {
+        terminal_printf(term, "ping: resolving %s (DNS)...", host);
+        if (dns_resolve_a(host, &ip, 4000) == 0) {
+            use_v6 = false;
+        } else if (dns_resolve_aaaa(host, &ip6, 4000) == 0) {
+            use_v6 = true;
+        } else {
+            terminal_printf(term, "ping: could not resolve '%s' (no A/AAAA)", host);
+            return;
+        }
+    }
+
+    if (!use_v6) {
+        terminal_printf(term, "PING %s (%u.%u.%u.%u): icmp_seq=1 32 data bytes",
+                        host,
+                        (unsigned)(ip & 0xFF), (unsigned)((ip >> 8) & 0xFF),
+                        (unsigned)((ip >> 16) & 0xFF), (unsigned)((ip >> 24) & 0xFF));
+        uint32_t rtt_ms = 0;
+        int      rc     = icmp_ping(ip, 3000, &rtt_ms);
+        if (rc == 0) {
+            terminal_printf(term,
+                            "64 bytes from %u.%u.%u.%u: icmp_seq=1 time=%u ms",
+                            (unsigned)(ip & 0xFF), (unsigned)((ip >> 8) & 0xFF),
+                            (unsigned)((ip >> 16) & 0xFF), (unsigned)((ip >> 24) & 0xFF),
+                            (unsigned)rtt_ms);
+        } else if (rc == -(int)ETIMEDOUT)
+            terminal_printf(term, "ping %s: request timed out", host);
+        else if (rc == -(int)EBUSY)
+            terminal_print(term, "ping: busy (another ping in progress)");
+        else
+            terminal_printf(term, "ping %s: failed (%d)", host, rc);
+        return;
+    }
+
+    char v6s[96];
+    net_format_ipv6(&ip6, v6s, sizeof(v6s));
+    terminal_printf(term, "PING6 %s (%s): icmp_seq=1 32 data bytes", host, v6s);
+    uint32_t rtt6 = 0;
+    int      r6   = icmp6_ping(&ip6, 3000, &rtt6);
+    if (r6 == 0)
+        terminal_printf(term, "64 bytes from %s: icmp_seq=1 time=%u ms", v6s,
+                        (unsigned)rtt6);
+    else if (r6 == -(int)ETIMEDOUT)
+        terminal_printf(term, "ping6 %s: request timed out", host);
+    else if (r6 == -(int)EBUSY)
+        terminal_print(term, "ping6: busy");
+    else
+        terminal_printf(term, "ping6 %s: failed (%d)", host, r6);
+}
+
+static void cmd_ping6(terminal_t *term, const char *args)
+{
+    const char *a = skip_ws(args);
+    if (*a == '\0' || str_starts_with(a, "help")) {
+        terminal_print(term, "Usage: ping6 <ipv6-address>");
+        return;
+    }
+    cmd_ping(term, args);
+}
+
 void terminal_execute_command(terminal_t *term, const char *cmd)
 {
     if (!term || !cmd)
@@ -1136,6 +1226,10 @@ void terminal_execute_command(terminal_t *term, const char *cmd)
         cmd_llm(term, "");
     } else if (cmd_word_is(w, "docker")) {
         cmd_docker(term, skip_ws(w + 6));
+    } else if (cmd_word_is(w, "ping")) {
+        cmd_ping(term, w + 4);
+    } else if (cmd_word_is(w, "ping6")) {
+        cmd_ping6(term, w + 5);
     } else if (str_equal(w, "reboot")) {
         terminal_print(term, "Rebooting AevOS...");
         klog("reboot requested via terminal\n");

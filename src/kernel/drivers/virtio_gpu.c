@@ -1,4 +1,5 @@
 #include "virtio_gpu.h"
+#include "virtio_pci_helpers.h"
 #include "pci.h"
 #include "../arch/arch.h"
 #include "../arch/io.h"
@@ -173,7 +174,6 @@ static inline uint32_t vr32(volatile uint8_t *base, uint32_t off) { return *(vol
 static inline void vw8(volatile uint8_t *base, uint32_t off, uint8_t val)  { *(volatile uint8_t *)(base + off) = val; }
 static inline void vw16(volatile uint8_t *base, uint32_t off, uint16_t val) { *(volatile uint16_t *)(base + off) = val; }
 static inline void vw32(volatile uint8_t *base, uint32_t off, uint32_t val) { *(volatile uint32_t *)(base + off) = val; }
-static inline void vw64(volatile uint8_t *base, uint32_t off, uint64_t val) { *(volatile uint64_t *)(base + off) = val; }
 
 /* Common config register offsets */
 #define CC_DEVICE_FEATURE_SEL  0x00
@@ -213,8 +213,9 @@ static void vq_submit_chain(uint16_t head)
         arch_dcache_flush_range(gpu.avail, asz);
     }
 
-    /* Notify the device */
+    __sync_synchronize();
     vw16(gpu.notify_base, gpu.queue_notify_off * gpu.notify_off_mult, 0);
+    __sync_synchronize();
 }
 
 static void vq_wait_used(void)
@@ -449,9 +450,9 @@ int virtio_gpu_init(uint64_t fb_phys, uint32_t width, uint32_t height)
     gpu.avail_phys = vq_phys + ALIGN_UP(desc_bytes, 4096);
     gpu.used_phys  = vq_phys + ALIGN_UP(desc_bytes, 4096) + ALIGN_UP(avail_bytes, 4096);
 
-    vw64(gpu.common_cfg, CC_QUEUE_DESC,   gpu.desc_phys);
-    vw64(gpu.common_cfg, CC_QUEUE_DRIVER, gpu.avail_phys);
-    vw64(gpu.common_cfg, CC_QUEUE_DEVICE, gpu.used_phys);
+    virtio_pci_common_cfg_write64(gpu.common_cfg, CC_QUEUE_DESC,   gpu.desc_phys);
+    virtio_pci_common_cfg_write64(gpu.common_cfg, CC_QUEUE_DRIVER, gpu.avail_phys);
+    virtio_pci_common_cfg_write64(gpu.common_cfg, CC_QUEUE_DEVICE, gpu.used_phys);
     vw16(gpu.common_cfg, CC_QUEUE_ENABLE, 1);
 
     gpu.queue_notify_off = vr16(gpu.common_cfg, CC_QUEUE_NOTIFY_OFF);

@@ -73,15 +73,6 @@ static void shell_coroutine(void *arg)
 
 void NORETURN kernel_main(boot_info_t *bi)
 {
-#if defined(__mips64)
-    /*
-     * Direct-boot path: boot_shim returns a kseg0 pointer (already valid).
-     * UEFI path (if ever used): convert low physical address to kseg0.
-     */
-    if ((uintptr_t)bi < PHYS_MAP_BASE)
-        bi = (boot_info_t *)((uintptr_t)bi + PHYS_MAP_BASE);
-#endif
-
     if (bi->magic != BOOT_MAGIC) { /* 0xAE05B007 */
         for (;;) arch_panic_stop();
     }
@@ -122,7 +113,6 @@ void NORETURN kernel_main(boot_info_t *bi)
      */
     bi = (boot_info_t *)((uintptr_t)bi + PHYS_MAP_BASE);
 #endif
-    /* mips64: bi was already converted to xkphys at kernel_main entry */
 
     klog("[mm] slab allocator init\n");
     slab_init();
@@ -142,9 +132,6 @@ void NORETURN kernel_main(boot_info_t *bi)
     pci_init();
     uint32_t pci_count = pci_get_device_count();
     klog("[pci] %u devices\n", pci_count);
-
-    if (virtio_input_init() != 0)
-        klog("[virtio-input] (optional) not present — serial/PS/2 only\n");
 
     klog("[net] network stack init\n");
     net_init();
@@ -179,9 +166,9 @@ void NORETURN kernel_main(boot_info_t *bi)
     /* Save the raw physical base before remapping for virtio-gpu backing */
     uint64_t fb_phys_base = (uint64_t)(uintptr_t)fb_handoff.base;
 
-#if defined(__aarch64__) || defined(__mips64) || defined(__riscv)
+#if defined(__aarch64__) || defined(__riscv)
     /*
-     * On aarch64/mips64/riscv64 UEFI, GOP FrameBufferBase is a raw physical
+     * On aarch64/riscv64 UEFI, GOP FrameBufferBase is a raw physical
      * address.  Remap through PHYS_MAP_BASE for the kernel direct map.
      */
     if (fb_handoff.base)
@@ -192,7 +179,7 @@ void NORETURN kernel_main(boot_info_t *bi)
     uint32_t gpu_height = fb_handoff.height ? fb_handoff.height : 768;
 
     /*
-     * fb_init() ignores w/h==0. AArch64 (and some MIPS) UEFI often provides no GOP
+     * fb_init() ignores w/h==0. AArch64 UEFI often provides no GOP
      * for virtio-gpu — allocate guest RAM for the desktop; scanout goes through virtio.
      */
     if (!fb_handoff.base || fb_handoff.width == 0 || fb_handoff.height == 0) {
@@ -255,6 +242,11 @@ void NORETURN kernel_main(boot_info_t *bi)
     } else {
         klog("[gpu] virtio-gpu not available (using direct framebuffer)\n");
     }
+
+    /* Init virtio-input after GPU so scanout runs even if input setup misbehaves. */
+    klog("[virtio-input] init (PCI virtio-keyboard / virtio-mouse)...\n");
+    if (virtio_input_init() != 0)
+        klog("[virtio-input] (optional) not present — serial/PS/2 only\n");
 
     hid_set_mouse_bounds((int32_t)(fb_ctx->width ? fb_ctx->width : gpu_width),
                          (int32_t)(fb_ctx->height ? fb_ctx->height : gpu_height));

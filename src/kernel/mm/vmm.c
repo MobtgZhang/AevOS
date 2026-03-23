@@ -160,8 +160,11 @@ uint64_t vmm_get_phys(vmm_ctx_t *ctx, uint64_t vaddr) {
         return 0;
 
 #if defined(__aarch64__)
-    if ((*pte & 3) == 1)  /* block descriptor */
+    if ((*pte & 3) == 1)  /* block (2 MiB) */
         return (*pte & PTE_ADDR_MASK) | (vaddr & 0x1FFFFF);
+    if ((*pte & 3) == 3)  /* page (4 KiB) */
+        return (*pte & PTE_ADDR_MASK) | (vaddr & 0xFFF);
+    return 0;
 #elif defined(__riscv)
     if (rv_pte_is_leaf(*pte))
         return rv_pte_table_phys(*pte) | (vaddr & 0x1FFFFF);
@@ -226,6 +229,7 @@ static void map_huge_range(vmm_ctx_t *ctx, uint64_t vbase,
 
         int p2 = (int)PD_INDEX(vaddr);
 #if defined(__aarch64__)
+        (void)riscv_leaf_exec;
         pd[p2] = phys | ((flags & PTE_NO_CACHE) ? ARM64_BLOCK_DEVICE
                                                  : ARM64_BLOCK_NORMAL);
 #elif defined(__riscv)
@@ -243,11 +247,10 @@ static void map_huge_range(vmm_ctx_t *ctx, uint64_t vbase,
 void vmm_init(boot_info_t *bi) {
     vmm_ready = false;
 
-#if defined(__loongarch64) || defined(__mips64)
+#if defined(__loongarch64)
     /*
-     * LoongArch uses DMW (Direct Mapping Windows); MIPS64 uses xkphys
-     * unmapped segments.  Both provide hardware-level physical-to-virtual
-     * translation without software page tables for kernel addresses.
+     * LoongArch uses DMW (Direct Mapping Windows): hardware-level
+     * physical-to-virtual translation without software page tables.
      */
     (void)bi;
     kernel_ctx.cr3  = 0;
@@ -324,6 +327,17 @@ void vmm_init(boot_info_t *bi) {
                    PHYS_MAP_BASE + AEVOS_X86_PCI_MMIO64_PHYS_LO,
                    AEVOS_X86_PCI_MMIO64_PHYS_LO,
                    AEVOS_X86_PCI_MMIO64_PHYS_SZ,
+                   flags | PTE_NO_CACHE, true);
+#endif
+#if defined(PCI_MMIO64_PHYS) && defined(PCI_MMIO64_SIZE)
+    /*
+     * RISC-V virt 等：virtio-pci modern 的 64-bit BAR 落在 RAM 以上的高 MMIO，
+     * 不在 [0, map_size) 内，须单独映射（AArch64 在同文件上方分支已处理）。
+     */
+    map_huge_range(&kernel_ctx,
+                   PHYS_MAP_BASE + PCI_MMIO64_PHYS,
+                   PCI_MMIO64_PHYS,
+                   ALIGN_UP(PCI_MMIO64_SIZE, 0x200000),
                    flags | PTE_NO_CACHE, true);
 #endif
 #endif

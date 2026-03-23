@@ -1,9 +1,11 @@
 #include "lwip_port.h"
 #include "../drivers/pci.h"
 #include "../drivers/virtio_net.h"
+#include "../drivers/timer.h"
 #include <aevos/config.h>
 #include <kernel/mm/slab.h>
 #include <kernel/klog.h>
+#include <kernel/arch/arch.h>
 #include <kernel/arch/io.h>
 #include <lib/string.h>
 
@@ -181,6 +183,8 @@ int arp_reply(const uint8_t *target_mac, uint32_t target_ip)
 
 int arp_process(const void *frame, size_t len)
 {
+    if (!g_iface)
+        return -EIO;
     if (len < sizeof(eth_header_t) + sizeof(arp_packet_t))
         return -EINVAL;
 
@@ -238,8 +242,840 @@ int ip_send(uint32_t dst_ip, uint8_t protocol,
 static void udp_process(uint32_t src_ip, const void *data, size_t len);
 static void tcp_process(uint32_t src_ip, const void *data, size_t len);
 
+/* One-shot ping waiter (terminal / single-threaded poll path) */
+static struct {
+    bool     active;
+    uint16_t id;
+    uint16_t seq;
+    uint32_t target_ip;
+    bool     replied;
+    uint64_t start_tick;
+} ping_wait;
+
+static uint16_t ping_seq_global;
+
+static struct {
+    bool        active;
+    uint16_t    id;
+    uint16_t    seq;
+    ipv6_addr_t target;
+    bool        replied;
+    uint64_t    start_tick;
+} ping6_wait;
+
+static uint16_t ping6_seq_g;
+
+int net_parse_ipv4(const char *s, uint32_t *ip_out)
+{
+    if (!s || !ip_out)
+        return -EINVAL;
+
+    while (*s == ' ' || *s == '\t')
+        s++;
+
+    unsigned oct[4];
+    for (int oi = 0; oi < 4; oi++) {
+        unsigned n = 0;
+        int      nd = 0;
+        while (*s >= '0' && *s <= '9') {
+            n = n * 10u + (unsigned)(*s - '0');
+            if (n > 255u)
+                return -EINVAL;
+            s++;
+            nd++;
+        }
+        if (nd == 0)
+            return -EINVAL;
+        oct[oi] = n;
+        if (oi < 3) {
+            if (*s != '.')
+                return -EINVAL;
+            s++;
+        }
+    }
+    while (*s == ' ' || *s == '\t')
+        s++;
+    if (*s != '\0')
+        return -EINVAL;
+
+    *ip_out = IP4((uint8_t)oct[0], (uint8_t)oct[1],
+                  (uint8_t)oct[2], (uint8_t)oct[3]);
+    return 0;
+}
+
+static uint32_t ip_next_hop(uint32_t dst_ip)
+{
+    if (!g_iface)
+        return dst_ip;
+    if ((dst_ip & g_iface->netmask) != (g_iface->ip & g_iface->netmask))
+        return g_iface->gateway;
+    return dst_ip;
+}
+
+static int icmp_wait_arp(uint32_t hop, uint64_t deadline_tick)
+{
+    arp_request(hop);
+    while ((int64_t)(deadline_tick - timer_get_ticks()) > 0) {
+        if (arp_lookup(hop))
+            return 0;
+        net_poll();
+        arch_spin_hint();
+    }
+    return -ETIMEDOUT;
+}
+
+static void icmp_process(uint32_t src_ip, const void *data, size_t len)
+{
+    if (len < 8 || !g_iface)
+        return;
+
+    const uint8_t *p = (const uint8_t *)data;
+    uint8_t        type = p[0];
+
+    if (type == ICMP_ECHOREPLY) {
+        if (!ping_wait.active)
+            return;
+        uint16_t rid  = (uint16_t)(((uint16_t)p[4] << 8) | p[5]);
+        uint16_t rseq = (uint16_t)(((uint16_t)p[6] << 8) | p[7]);
+        if (src_ip == ping_wait.target_ip &&
+            rid == ping_wait.id && rseq == ping_wait.seq)
+            ping_wait.replied = true;
+        return;
+    }
+
+    if (type == ICMP_ECHO) {
+        uint8_t reply[512];
+        if (len > sizeof(reply))
+            len = sizeof(reply);
+        reply[0] = ICMP_ECHOREPLY;
+        reply[1] = 0;
+        reply[2] = 0;
+        reply[3] = 0;
+        memcpy(reply + 4, p + 4, len - 4);
+        uint16_t csum = ip_checksum(reply, len);
+        memcpy(reply + 2, &csum, sizeof(csum));
+        (void)ip_send(src_ip, IP_PROTO_ICMP, reply, len);
+    }
+}
+
+int icmp_ping(uint32_t dst_ip, uint32_t timeout_ms, uint32_t *rtt_ms_out)
+{
+    if (!rtt_ms_out)
+        return -EINVAL;
+    if (!g_iface || !g_iface->is_up)
+        return -EIO;
+
+    uint32_t hop = ip_next_hop(dst_ip);
+    uint64_t arp_deadline = timer_get_ticks() +
+        (uint64_t)2000 * (uint64_t)TIMER_FREQ_HZ / 1000ull;
+    if (icmp_wait_arp(hop, arp_deadline) < 0)
+        return -ETIMEDOUT;
+
+    if (ping_wait.active || ping6_wait.active)
+        return -EBUSY;
+
+    enum { icmp_payload = 32 };
+    uint8_t           icmp[8 + icmp_payload];
+    const uint16_t    id  = 0xAEA1;
+    const uint16_t    seq = ++ping_seq_global;
+
+    memset(icmp, 0, sizeof(icmp));
+    icmp[0] = ICMP_ECHO;
+    icmp[1] = 0;
+    icmp_echo_header_t *eh = (icmp_echo_header_t *)icmp;
+    eh->checksum    = 0;
+    eh->identifier  = htons(id);
+    eh->sequence    = htons(seq);
+    for (int i = 0; i < icmp_payload; i++)
+        icmp[8 + i] = (uint8_t)i;
+    eh->checksum = ip_checksum(icmp, sizeof(icmp));
+
+    ping_wait.active     = true;
+    ping_wait.id         = id;
+    ping_wait.seq        = seq;
+    ping_wait.target_ip  = dst_ip;
+    ping_wait.replied    = false;
+    ping_wait.start_tick = timer_get_ticks();
+
+    int snd = ip_send(dst_ip, IP_PROTO_ICMP, icmp, sizeof(icmp));
+    if (snd < 0) {
+        net_poll();
+        snd = ip_send(dst_ip, IP_PROTO_ICMP, icmp, sizeof(icmp));
+    }
+    if (snd < 0) {
+        ping_wait.active = false;
+        return -EIO;
+    }
+
+    uint64_t ping_deadline = timer_get_ticks() +
+        (uint64_t)timeout_ms * (uint64_t)TIMER_FREQ_HZ / 1000ull;
+    if (ping_deadline < ping_wait.start_tick)
+        ping_deadline = ping_wait.start_tick;
+
+    while ((int64_t)(ping_deadline - timer_get_ticks()) > 0) {
+        if (ping_wait.replied) {
+            uint64_t dt = timer_get_ticks() - ping_wait.start_tick;
+            *rtt_ms_out =
+                (uint32_t)(dt * 1000ull / (uint64_t)TIMER_FREQ_HZ);
+            ping_wait.active = false;
+            return 0;
+        }
+        net_poll();
+        arch_spin_hint();
+    }
+
+    ping_wait.active = false;
+    return -ETIMEDOUT;
+}
+
+uint32_t net_ipv4_dns_server(void)
+{
+    if (!g_iface)
+        return 0;
+    if (g_iface->dns4)
+        return g_iface->dns4;
+    return g_iface->gateway;
+}
+
+int net_wait_arp_ipv4(uint32_t ipv4, uint32_t timeout_ms)
+{
+    if (!g_iface)
+        return -EIO;
+    uint32_t hop = ip_next_hop(ipv4);
+    uint64_t deadline = timer_get_ticks() +
+        (uint64_t)timeout_ms * (uint64_t)TIMER_FREQ_HZ / 1000ull;
+    arp_request(hop);
+    return icmp_wait_arp(hop, deadline);
+}
+
+void net_iface_ipv6_linklocal_from_mac(net_interface_t *iface)
+{
+    if (!iface)
+        return;
+    memset(&iface->ipv6_link_local, 0, sizeof(iface->ipv6_link_local));
+    iface->ipv6_link_local.b[0] = 0xfe;
+    iface->ipv6_link_local.b[1] = 0x80;
+    uint8_t *p = iface->ipv6_link_local.b + 8;
+    p[0]       = (uint8_t)(iface->mac[0] ^ 0x02);
+    p[1]       = iface->mac[1];
+    p[2]       = iface->mac[2];
+    p[3]       = 0xff;
+    p[4]       = 0xfe;
+    p[5]       = iface->mac[3];
+    p[6]       = iface->mac[4];
+    p[7]       = iface->mac[5];
+}
+
+static int xdigit(int c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return 10 + c - 'a';
+    if (c >= 'A' && c <= 'F')
+        return 10 + c - 'A';
+    return -1;
+}
+
+int net_parse_ipv6(const char *s, ipv6_addr_t *out)
+{
+    if (!s || !out)
+        return -EINVAL;
+    memset(out->b, 0, 16);
+
+    char  tmp[128];
+    size_t ti = 0;
+    while (*s == ' ' || *s == '\t')
+        s++;
+    while (*s && *s != '%' && ti + 1 < sizeof(tmp))
+        tmp[ti++] = *s++;
+    tmp[ti] = '\0';
+    if (ti == 0)
+        return -EINVAL;
+
+    /* ::1 or :: */
+    if (tmp[0] == ':' && tmp[1] == ':' && tmp[2] == '\0') {
+        return 0;
+    }
+    if (tmp[0] == ':' && tmp[1] == ':' && tmp[2] == '1' && tmp[3] == '\0') {
+        out->b[15] = 1;
+        return 0;
+    }
+
+    /* Embedded IPv4: ... : a.b.c.d */
+    const char *last_colon = NULL;
+    for (const char *p = tmp; *p; p++)
+        if (*p == ':')
+            last_colon = p;
+    int dots = 0;
+    if (last_colon) {
+        for (const char *p = last_colon + 1; *p; p++)
+            if (*p == '.')
+                dots++;
+    }
+    if (dots == 3 && last_colon) {
+        uint32_t v4;
+        if (net_parse_ipv4(last_colon + 1, &v4) != 0)
+            return -EINVAL;
+        char left[96];
+        size_t ll = (size_t)(last_colon - tmp);
+        if (ll >= sizeof(left))
+            return -EINVAL;
+        memcpy(left, tmp, ll);
+        left[ll] = '\0';
+        uint16_t words[8];
+        memset(words, 0, sizeof(words));
+        const char *p = left;
+        if (*p == ':')
+            p++;
+        unsigned wi = 0;
+        while (*p && wi < 8) {
+            if (*p == ':') {
+                p++;
+                continue;
+            }
+            unsigned v = 0;
+            int      nd = 0;
+            while (*p && *p != ':') {
+                int xd = xdigit((unsigned char)*p);
+                if (xd < 0)
+                    return -EINVAL;
+                v = (v << 4) | (unsigned)xd;
+                if (v > 0xFFFFu)
+                    return -EINVAL;
+                p++;
+                nd++;
+            }
+            if (nd == 0)
+                return -EINVAL;
+            words[wi++] = (uint16_t)v;
+            if (*p == ':')
+                p++;
+        }
+        for (unsigned i = 0; i < 8; i++) {
+            out->b[i * 2]     = (uint8_t)(words[i] >> 8);
+            out->b[i * 2 + 1] = (uint8_t)words[i];
+        }
+        out->b[12] = (uint8_t)(v4 & 0xFF);
+        out->b[13] = (uint8_t)((v4 >> 8) & 0xFF);
+        out->b[14] = (uint8_t)((v4 >> 16) & 0xFF);
+        out->b[15] = (uint8_t)((v4 >> 24) & 0xFF);
+        return 0;
+    }
+
+    /* Generic: groups separated by :, optional :: */
+    uint16_t words[8];
+    memset(words, 0, sizeof(words));
+    const char *p   = tmp;
+    unsigned  wi    = 0;
+    int       dbl   = -1;
+
+    if (p[0] == ':' && p[1] == ':') {
+        dbl = 0;
+        p += 2;
+    }
+
+    while (*p) {
+        if (p[0] == ':' && p[1] == ':') {
+            if (dbl >= 0)
+                return -EINVAL;
+            dbl = (int)wi;
+            p += 2;
+            continue;
+        }
+        if (*p == ':')
+            return -EINVAL;
+        unsigned v = 0;
+        int      nd = 0;
+        while (*p && *p != ':') {
+            int xd = xdigit((unsigned char)*p);
+            if (xd < 0)
+                return -EINVAL;
+            v = (v << 4) | (unsigned)xd;
+            if (v > 0xFFFFu)
+                return -EINVAL;
+            p++;
+            nd++;
+        }
+        if (nd == 0)
+            return -EINVAL;
+        if (wi >= 8)
+            return -EINVAL;
+        words[wi++] = (uint16_t)v;
+        if (*p == ':')
+            p++;
+    }
+
+    unsigned used = wi;
+    if (dbl < 0) {
+        if (used != 8)
+            return -EINVAL;
+    } else {
+        unsigned ins = 8 - used;
+        if (ins + used > 8)
+            return -EINVAL;
+        uint16_t w2[8];
+        memset(w2, 0, sizeof(w2));
+        unsigned i = 0, o = 0;
+        while (i < (unsigned)dbl && o < 8)
+            w2[o++] = words[i++];
+        o += ins;
+        while (i < used && o < 8)
+            w2[o++] = words[i++];
+        memcpy(words, w2, sizeof(words));
+    }
+
+    for (unsigned i = 0; i < 8; i++) {
+        out->b[i * 2]     = (uint8_t)(words[i] >> 8);
+        out->b[i * 2 + 1] = (uint8_t)words[i];
+    }
+    return 0;
+}
+
+static void hex2(char *p, uint8_t v)
+{
+    static const char xd[] = "0123456789abcdef";
+    p[0]                   = xd[v >> 4];
+    p[1]                   = xd[v & 0x0F];
+}
+
+void net_format_ipv6(const ipv6_addr_t *a, char *buf, size_t cap)
+{
+    if (!a || !buf || cap < 40) {
+        if (buf && cap)
+            buf[0] = '\0';
+        return;
+    }
+    char *w = buf;
+    for (int i = 0; i < 16; i += 2) {
+        if (i)
+            *w++ = ':';
+        hex2(w, a->b[i]);
+        w += 2;
+        hex2(w, a->b[i + 1]);
+        w += 2;
+    }
+    *w = '\0';
+}
+
+/* ── IPv6 / ICMPv6 / NDP (subset) ─────────────────────────────────── */
+
+#define IP6_NXT_ICMP6 58
+
+#define ICMP6_ECHO_REQ 128
+#define ICMP6_ECHO_REP 129
+#define ICMP6_NS       135
+#define ICMP6_NA       136
+
+#define ND_OPT_SRCLLA 1
+#define ND_OPT_TGTLLA 2
+
+#define ND_CACHE 24
+
+static struct {
+    ipv6_addr_t ip;
+    uint8_t     mac[ETH_ADDR_LEN];
+    bool        valid;
+} nd_tbl[ND_CACHE];
+
+static void nd_cache_add(const ipv6_addr_t *ip, const uint8_t *mac)
+{
+    for (int i = 0; i < ND_CACHE; i++) {
+        if (nd_tbl[i].valid && memcmp(nd_tbl[i].ip.b, ip->b, 16) == 0) {
+            memcpy(nd_tbl[i].mac, mac, ETH_ADDR_LEN);
+            return;
+        }
+    }
+    for (int i = 0; i < ND_CACHE; i++) {
+        if (!nd_tbl[i].valid) {
+            nd_tbl[i].ip = *ip;
+            memcpy(nd_tbl[i].mac, mac, ETH_ADDR_LEN);
+            nd_tbl[i].valid = true;
+            return;
+        }
+    }
+    nd_tbl[0].ip = *ip;
+    memcpy(nd_tbl[0].mac, mac, ETH_ADDR_LEN);
+    nd_tbl[0].valid = true;
+}
+
+static const uint8_t *nd_lookup(const ipv6_addr_t *ip)
+{
+    for (int i = 0; i < ND_CACHE; i++) {
+        if (nd_tbl[i].valid && memcmp(nd_tbl[i].ip.b, ip->b, 16) == 0)
+            return nd_tbl[i].mac;
+    }
+    return NULL;
+}
+
+static bool ipv6_is_loopback(const ipv6_addr_t *a)
+{
+    for (int i = 0; i < 15; i++)
+        if (a->b[i])
+            return false;
+    return a->b[15] == 1;
+}
+
+static bool ipv6_is_linklocal(const ipv6_addr_t *a)
+{
+    return a->b[0] == 0xfe && (a->b[1] & 0xc0) == 0x80;
+}
+
+static void ipv6_solicited_mcast(const ipv6_addr_t *tgt, ipv6_addr_t *mc)
+{
+    memset(mc->b, 0, 16);
+    mc->b[0]  = 0xff;
+    mc->b[1]  = 0x02;
+    mc->b[11] = 1;
+    mc->b[12] = 0xff;
+    mc->b[13] = tgt->b[13];
+    mc->b[14] = tgt->b[14];
+    mc->b[15] = tgt->b[15];
+}
+
+static void ipv6_mcast_mac(const ipv6_addr_t *ip, uint8_t *mac)
+{
+    mac[0] = 0x33;
+    mac[1] = 0x33;
+    mac[2] = ip->b[12];
+    mac[3] = ip->b[13];
+    mac[4] = ip->b[14];
+    mac[5] = ip->b[15];
+}
+
+static bool ipv6_solicited_for_us(const ipv6_addr_t *d)
+{
+    const ipv6_addr_t *me = &g_iface->ipv6_link_local;
+    if (d->b[0] != 0xff || d->b[1] != 0x02)
+        return false;
+    if (d->b[11] != 1 || d->b[12] != 0xff)
+        return false;
+    return d->b[13] == me->b[13] && d->b[14] == me->b[14] &&
+           d->b[15] == me->b[15];
+}
+
+static bool ipv6_dst_for_us(const ipv6_addr_t *d)
+{
+    if (memcmp(d->b, g_iface->ipv6_link_local.b, 16) == 0)
+        return true;
+    return ipv6_solicited_for_us(d);
+}
+
+static uint16_t icmp6_csum(const ipv6_addr_t *src, const ipv6_addr_t *dst,
+                           uint8_t nxt, const uint8_t *icmp, size_t icmplen)
+{
+    uint8_t scratch[40 + 256];
+    if (icmplen > sizeof(scratch) - 40)
+        return 0;
+    memcpy(scratch, src->b, 16);
+    memcpy(scratch + 16, dst->b, 16);
+    uint32_t lbe = htonl((uint32_t)icmplen);
+    memcpy(scratch + 32, &lbe, 4);
+    scratch[36] = scratch[37] = scratch[38] = 0;
+    scratch[39] = nxt;
+    memcpy(scratch + 40, icmp, icmplen);
+    if (icmplen >= 4) {
+        scratch[42] = 0;
+        scratch[43] = 0;
+    }
+    return ip_checksum(scratch, 40 + icmplen);
+}
+
+static int ipv6_send_eth(const uint8_t *dst_mac, const ipv6_addr_t *src,
+                         const ipv6_addr_t *dst, uint8_t nxt,
+                         const void *payload, size_t plen)
+{
+    if (!g_iface || plen + 40 > ETH_MTU)
+        return -EINVAL;
+    uint8_t pkt[ETH_MTU];
+    memset(pkt, 0, 40);
+    pkt[0] = 0x60;
+    uint16_t plbe = htons((uint16_t)plen);
+    memcpy(pkt + 4, &plbe, 2);
+    pkt[6]  = nxt;
+    pkt[7]  = (nxt == IP6_NXT_ICMP6 && plen >= 4 &&
+               (payload && ((const uint8_t *)payload)[0] >= ICMP6_NS)) ?
+                  (uint8_t)255 :
+                  (uint8_t)64;
+    memcpy(pkt + 8, src->b, 16);
+    memcpy(pkt + 24, dst->b, 16);
+    memcpy(pkt + 40, payload, plen);
+    return eth_send(dst_mac, ETH_TYPE_IPV6, pkt, 40 + plen);
+}
+
+static void ndp_send_ns(const ipv6_addr_t *target)
+{
+    ipv6_addr_t mc;
+    uint8_t     dmac[ETH_ADDR_LEN];
+    ipv6_solicited_mcast(target, &mc);
+    ipv6_mcast_mac(&mc, dmac);
+
+    uint8_t icmp[32];
+    memset(icmp, 0, sizeof(icmp));
+    icmp[0] = ICMP6_NS;
+    icmp[1] = 0;
+    memcpy(icmp + 8, target->b, 16);
+    icmp[24] = ND_OPT_SRCLLA;
+    icmp[25] = 1;
+    memcpy(icmp + 26, g_iface->mac, ETH_ADDR_LEN);
+
+    uint16_t cs = icmp6_csum(&g_iface->ipv6_link_local, &mc, IP6_NXT_ICMP6,
+                              icmp, 32);
+    icmp[2] = (uint8_t)(cs & 0xFF);
+    icmp[3] = (uint8_t)(cs >> 8);
+
+    (void)ipv6_send_eth(dmac, &g_iface->ipv6_link_local, &mc, IP6_NXT_ICMP6,
+                        icmp, 32);
+}
+
+static int ndp_resolve(const ipv6_addr_t *tgt, uint8_t *mac_out,
+                       uint32_t timeout_ms)
+{
+    const uint8_t *e = nd_lookup(tgt);
+    if (e) {
+        memcpy(mac_out, e, ETH_ADDR_LEN);
+        return 0;
+    }
+    ndp_send_ns(tgt);
+    uint64_t deadline = timer_get_ticks() +
+        (uint64_t)timeout_ms * (uint64_t)TIMER_FREQ_HZ / 1000ull;
+    while ((int64_t)(deadline - timer_get_ticks()) > 0) {
+        e = nd_lookup(tgt);
+        if (e) {
+            memcpy(mac_out, e, ETH_ADDR_LEN);
+            return 0;
+        }
+        net_poll();
+        arch_spin_hint();
+    }
+    return -ETIMEDOUT;
+}
+
+static void ndp_send_na(const ipv6_addr_t *dst_ip, const uint8_t *dst_mac,
+                        const ipv6_addr_t *target)
+{
+    uint8_t icmp[32];
+    memset(icmp, 0, sizeof(icmp));
+    icmp[0] = ICMP6_NA;
+    icmp[1] = 0;
+    icmp[4] = 0x40; /* Solicited */
+    memcpy(icmp + 8, target->b, 16);
+    icmp[24] = ND_OPT_TGTLLA;
+    icmp[25] = 1;
+    memcpy(icmp + 26, g_iface->mac, ETH_ADDR_LEN);
+
+    uint16_t cs =
+        icmp6_csum(&g_iface->ipv6_link_local, dst_ip, IP6_NXT_ICMP6, icmp, 32);
+    icmp[2] = (uint8_t)(cs & 0xFF);
+    icmp[3] = (uint8_t)(cs >> 8);
+
+    (void)ipv6_send_eth(dst_mac, &g_iface->ipv6_link_local, dst_ip,
+                        IP6_NXT_ICMP6, icmp, 32);
+}
+
+static void icmp6_process(const ipv6_addr_t *src, const ipv6_addr_t *dst,
+                          const uint8_t *pay, size_t len)
+{
+    (void)dst;
+    if (len < 8 || !g_iface)
+        return;
+    uint8_t type = pay[0];
+
+    if (type == ICMP6_ECHO_REP) {
+        if (!ping6_wait.active || len < 8)
+            return;
+        uint16_t rid =
+            (uint16_t)(((uint16_t)pay[4] << 8) | pay[5]);
+        uint16_t rseq =
+            (uint16_t)(((uint16_t)pay[6] << 8) | pay[7]);
+        if (memcmp(src->b, ping6_wait.target.b, 16) == 0 &&
+            rid == ping6_wait.id && rseq == ping6_wait.seq)
+            ping6_wait.replied = true;
+        return;
+    }
+
+    if (type == ICMP6_ECHO_REQ && len >= 8) {
+        uint8_t  reply[128];
+        size_t   rlen = (len > sizeof(reply)) ? sizeof(reply) : len;
+        memcpy(reply, pay, rlen);
+        reply[0] = ICMP6_ECHO_REP;
+        reply[2] = reply[3] = 0;
+        uint16_t cs = icmp6_csum(&g_iface->ipv6_link_local, src, IP6_NXT_ICMP6,
+                                  reply, rlen);
+        reply[2] = (uint8_t)(cs & 0xFF);
+        reply[3] = (uint8_t)(cs >> 8);
+        const uint8_t *dm = nd_lookup(src);
+        uint8_t          mac_buf[ETH_ADDR_LEN];
+        if (!dm) {
+            if (ndp_resolve(src, mac_buf, 500) < 0)
+                return;
+            dm = mac_buf;
+        }
+        (void)ipv6_send_eth(dm, &g_iface->ipv6_link_local, src, IP6_NXT_ICMP6,
+                            reply, rlen);
+        return;
+    }
+
+    if (type == ICMP6_NS && len >= 24) {
+        ipv6_addr_t tgt;
+        memcpy(tgt.b, pay + 8, 16);
+        if (memcmp(tgt.b, g_iface->ipv6_link_local.b, 16) != 0)
+            return;
+        const uint8_t *smac = NULL;
+        uint8_t          optmac[ETH_ADDR_LEN];
+        size_t           off = 24;
+        while (off + 2 <= len) {
+            uint8_t ot = pay[off];
+            uint8_t olen = pay[off + 1];
+            if (olen == 0)
+                break;
+            size_t ob = (size_t)olen * 8u;
+            if (off + ob > len)
+                break;
+            if (ot == ND_OPT_SRCLLA && ob >= 8) {
+                memcpy(optmac, pay + off + 2, ETH_ADDR_LEN);
+                smac = optmac;
+                break;
+            }
+            off += ob;
+        }
+        if (!smac)
+            return;
+        ndp_send_na(src, smac, &tgt);
+        return;
+    }
+
+    if (type == ICMP6_NA && len >= 24) {
+        ipv6_addr_t tgt;
+        memcpy(tgt.b, pay + 8, 16);
+        size_t off = 24;
+        while (off + 2 <= len) {
+            uint8_t ot = pay[off];
+            uint8_t olen = pay[off + 1];
+            if (olen == 0)
+                break;
+            size_t ob = (size_t)olen * 8u;
+            if (off + ob > len)
+                break;
+            if (ot == ND_OPT_TGTLLA && ob >= 8) {
+                nd_cache_add(&tgt, pay + off + 2);
+                break;
+            }
+            off += ob;
+        }
+    }
+}
+
+static int ipv6_receive(const void *frame, size_t len)
+{
+    if (!g_iface || len < sizeof(eth_header_t) + 40)
+        return -EINVAL;
+
+    const uint8_t *eth = (const uint8_t *)frame;
+    const uint8_t *ip6 = eth + sizeof(eth_header_t);
+    if ((ip6[0] & 0xf0) != 0x60)
+        return 0;
+
+    uint16_t plen =
+        (uint16_t)(((uint16_t)ip6[4] << 8) | ip6[5]);
+    if (sizeof(eth_header_t) + 40u + (size_t)plen > len)
+        return -EINVAL;
+
+    ipv6_addr_t dst, src;
+    memcpy(dst.b, ip6 + 24, 16);
+    memcpy(src.b, ip6 + 8, 16);
+
+    if (!ipv6_dst_for_us(&dst))
+        return 0;
+
+    uint8_t nxt = ip6[6];
+    if (nxt != IP6_NXT_ICMP6)
+        return 0;
+
+    icmp6_process(&src, &dst, ip6 + 40, plen);
+    return 0;
+}
+
+int icmp6_ping(const ipv6_addr_t *dst, uint32_t timeout_ms, uint32_t *rtt_ms_out)
+{
+    if (!dst || !rtt_ms_out || !g_iface || !g_iface->is_up)
+        return -EINVAL;
+
+    if (ipv6_is_loopback(dst)) {
+        *rtt_ms_out = 0;
+        return 0;
+    }
+
+    if (ping6_wait.active || ping_wait.active)
+        return -EBUSY;
+
+    uint8_t dmac[ETH_ADDR_LEN];
+    if (ipv6_is_linklocal(dst)) {
+        if (ndp_resolve(dst, dmac, 2000) < 0)
+            return -ETIMEDOUT;
+    } else {
+        if (net_wait_arp_ipv4(g_iface->gateway, 2000) < 0)
+            return -ETIMEDOUT;
+        const uint8_t *gm = arp_lookup(g_iface->gateway);
+        if (!gm)
+            return -EIO;
+        memcpy(dmac, gm, ETH_ADDR_LEN);
+    }
+
+    enum { pld = 32 };
+    uint8_t icmp[8 + pld];
+    memset(icmp, 0, sizeof(icmp));
+    icmp[0] = ICMP6_ECHO_REQ;
+    icmp[1] = 0;
+    uint16_t id  = 0xAE6u;
+    uint16_t seq = ++ping6_seq_g;
+    icmp[4] = (uint8_t)(id >> 8);
+    icmp[5] = (uint8_t)id;
+    icmp[6] = (uint8_t)(seq >> 8);
+    icmp[7] = (uint8_t)seq;
+    for (int i = 0; i < pld; i++)
+        icmp[8 + i] = (uint8_t)i;
+
+    uint16_t cs = icmp6_csum(&g_iface->ipv6_link_local, dst, IP6_NXT_ICMP6,
+                             icmp, sizeof(icmp));
+    icmp[2] = (uint8_t)(cs & 0xFF);
+    icmp[3] = (uint8_t)(cs >> 8);
+
+    ping6_wait.active     = true;
+    ping6_wait.id         = id;
+    ping6_wait.seq        = seq;
+    ping6_wait.target     = *dst;
+    ping6_wait.replied    = false;
+    ping6_wait.start_tick = timer_get_ticks();
+
+    if (ipv6_send_eth(dmac, &g_iface->ipv6_link_local, dst, IP6_NXT_ICMP6,
+                       icmp, sizeof(icmp)) < 0) {
+        ping6_wait.active = false;
+        return -EIO;
+    }
+
+    uint64_t deadline = timer_get_ticks() +
+        (uint64_t)timeout_ms * (uint64_t)TIMER_FREQ_HZ / 1000ull;
+    while ((int64_t)(deadline - timer_get_ticks()) > 0) {
+        if (ping6_wait.replied) {
+            uint64_t dt = timer_get_ticks() - ping6_wait.start_tick;
+            *rtt_ms_out =
+                (uint32_t)(dt * 1000ull / (uint64_t)TIMER_FREQ_HZ);
+            ping6_wait.active = false;
+            return 0;
+        }
+        net_poll();
+        arch_spin_hint();
+    }
+
+    ping6_wait.active = false;
+    return -ETIMEDOUT;
+}
+
 int ip_receive(const void *frame, size_t len)
 {
+    if (!g_iface)
+        return -EINVAL;
     if (len < sizeof(eth_header_t) + sizeof(ipv4_header_t))
         return -EINVAL;
 
@@ -263,6 +1099,9 @@ int ip_receive(const void *frame, size_t len)
         break;
     case IP_PROTO_TCP:
         tcp_process(ip->src_ip, payload, payload_len);
+        break;
+    case IP_PROTO_ICMP:
+        icmp_process(ip->src_ip, payload, payload_len);
         break;
     default:
         break;
@@ -706,6 +1545,8 @@ int net_process_frame(const void *frame, size_t len)
         return arp_process(frame, len);
     case ETH_TYPE_IPV4:
         return ip_receive(frame, len);
+    case ETH_TYPE_IPV6:
+        return ipv6_receive(frame, len);
     default:
         return 0;
     }

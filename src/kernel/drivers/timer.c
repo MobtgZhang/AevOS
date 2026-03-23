@@ -117,34 +117,6 @@ void timer_init(uint32_t freq_hz)
          (unsigned long long)cntfrq);
 }
 
-#elif defined(__mips64)
-
-/*
- * MIPS64 CP0 Count/Compare timer.
- * CP0.Count increments at half the pipeline clock rate (QEMU ~100 MHz).
- */
-
-#define MIPS64_TIMER_FREQ 100000000UL
-
-static uint32_t mips64_timer_period;
-
-void timer_init(uint32_t freq_hz)
-{
-    if (freq_hz == 0) freq_hz = TIMER_FREQ_HZ;
-    configured_freq = freq_hz;
-
-    mips64_timer_period = MIPS64_TIMER_FREQ / freq_hz;
-
-    uint32_t count;
-    __asm__ volatile("mfc0 %0, $9" : "=r"(count));
-    uint32_t compare = count + mips64_timer_period;
-    __asm__ volatile("mtc0 %0, $11" : : "r"(compare));
-
-    tick_count = 0;
-    last_check_tick = 0;
-    klog("[timer] MIPS64 CP0 timer at %u Hz (period=%u)\n", freq_hz, mips64_timer_period);
-}
-
 #else /* riscv64 — stub */
 
 void timer_init(uint32_t freq_hz)
@@ -169,14 +141,6 @@ void timer_handler(void)
     {
         extern uint64_t aarch64_timer_tval;
         __asm__ volatile("msr cntp_tval_el0, %0" : : "r"(aarch64_timer_tval));
-    }
-#elif defined(__mips64)
-    {
-        extern uint32_t mips64_timer_period;
-        uint32_t compare;
-        __asm__ volatile("mfc0 %0, $11" : "=r"(compare));
-        compare += mips64_timer_period;
-        __asm__ volatile("mtc0 %0, $11" : : "r"(compare));
     }
 #endif
     tick_count++;
@@ -205,8 +169,6 @@ void timer_sleep_ms(uint32_t ms)
         __asm__ volatile("wfi");
 #elif defined(__loongarch64)
         __asm__ volatile("idle 0");
-#elif defined(__mips64)
-        __asm__ volatile("wait");
 #endif
     }
 }

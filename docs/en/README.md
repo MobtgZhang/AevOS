@@ -4,16 +4,15 @@
 
 ---
 
-## Architecture (L0–L6 + LC)
+## Architecture (L0–L4)
 
-| Layer | Contents |
-|-------|----------|
-| **L6** | Shell: sidebar, chat (streaming API), terminal, `ws_bridge` stub |
-| **L5** | Self-evolution: `src/evolution/` (scaffold) |
-| **L4** | Agent runtime: `EventLog`, `mailbox`, four tool states, cancel broadcast |
-| **L3** | HMS: history / memory / skills + `hms_cache` (L1 CLOCK-style) |
-| **LC** | Container layer: `src/container/` (sandbox, IFC, Linux shim, OCI scaffold) |
-| **L2** | LLM: `llm_syscall` façade; remote OpenAI path stubbed in `llm_api_client.c` |
+Aligned with `ideas/ideas2.md`: **L2** is the AI infrastructure layer (**LLM / LC / HMS** pillars); **L3** is the agent layer (**agent runtime** + **self-evolution** columns); **L4** is the shell.
+
+| OS layer | Contents |
+|----------|----------|
+| **L4** | Shell: sidebar, chat (streaming API), terminal, `ws_bridge` stub |
+| **L3** | Agent layer: left—`EventLog`, `mailbox`, four tool states, `scheduler_cancel_*`; right—`src/evolution/` (Planner/Corrector/Verifier/Evolver scaffold) |
+| **L2** | AI infrastructure: **LLM** (`llm_syscall`, `llm_api_client`) · **LC** (`src/container/`) · **HMS** (history/memory/skill, `hms_cache` tiers C1–C3) |
 | **L1** | Micro-kernel: PMM/VMM, coroutines, VFS + **`procfs`** + **`devfs`**, **virtio-net** |
 | **L0** | UEFI: parses **`EFI\AevOS\boot.json`** when present |
 
@@ -21,7 +20,7 @@
 
 ## Build & run
 
-**`ARCH`**: `x86_64`, `aarch64`, `riscv64`, `loongarch64`, **`mips64el`** (direct `-kernel`).
+**`ARCH`**: `x86_64`, `aarch64`, `riscv64`, `loongarch64`.
 
 ```bash
 make
@@ -46,5 +45,6 @@ Default: **in-memory** `aevos_db`. For SQLite, see **`third_party/sqlite3/README
 
 ## Further reading
 
-- [architecture.md](architecture.md) · [hms.md](hms.md) · [container.md](container.md) · [evolution.md](evolution.md) · [llm-syscall.md](llm-syscall.md)
+Topic guides are **in-depth** (layer structure, algorithms, formal/roadmap notes from `ideas/`, and source pointers): [architecture.md](architecture.md), [hms.md](hms.md), [container.md](container.md), [evolution.md](evolution.md), [llm-syscall.md](llm-syscall.md).
+
 - 中文: [简体中文文档](../zh/README.md)

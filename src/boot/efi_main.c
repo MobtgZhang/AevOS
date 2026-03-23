@@ -462,12 +462,12 @@ static EFI_STATUS setup_aarch64_page_tables(EFI_BOOT_SERVICES *bs,
 
 #endif /* __aarch64__ */
 
-/* ── RISC-V 64: Sv48 页表（身份 + 0xFFFFFFC000000000 线性映射）────────── */
+/* ── RISC-V 64: Sv48 页表（身份 + PHYS_MAP_BASE 线性映射，须与 config.h 一致）── */
 
 #if defined(__riscv)
 
 #define RISCV_DRAM_BASE     0x80000000ULL
-#define RISCV_PHYS_MAP_BASE 0xFFFFFFC000000000ULL
+#define RISCV_PHYS_MAP_BASE 0xFFFF800000000000ULL
 #define RISCV_MAP_RAM_EXTRA (8ULL * 1024 * 1024 * 1024)
 #define RISCV_SATP_MODE_SV48 (9ULL << 60)
 
@@ -489,7 +489,11 @@ static UINT64 *rv_alloc_pt(EFI_BOOT_SERVICES *bs, EFI_STATUS *st)
         return (UINT64 *)0;
     }
     EFI_PHYSICAL_ADDRESS p = 0;
-    *st = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &p);
+    /*
+     * LoaderData 在 ExitBootServices 后可能被固件回收；若 satp 仍指向这些页，
+     * 早期内核取指/访问会异常。RuntimeServicesData 在 handoff 期间保持有效。
+     */
+    *st = bs->AllocatePages(AllocateAnyPages, EfiRuntimeServicesData, 1, &p);
     if (*st != EFI_SUCCESS)
         return (UINT64 *)0;
     boot_memset((void *)(UINTN)p, 0, 4096);
@@ -1088,29 +1092,6 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
         "csrw satp, %0\n\t"
         "sfence.vma zero, zero\n\t"
         : : "r"(riscv_satp_val) : "memory");
-#endif
-
-#if defined(__mips64) || defined(__mips__)
-    {
-        /*
-         * MIPS64 UEFI path: ensure 64-bit kernel mode (Status.KX=1) and
-         * convert the stack pointer to kseg0 so the kernel can use it
-         * without TLB translations.
-         */
-        UINT32 sr;
-        __asm__ volatile("mfc0 %0, $12" : "=r"(sr));
-        sr |= (1u << 7) | (1u << 6) | (1u << 5); /* KX, SX, UX */
-        sr &= ~((1u << 22) | (1u << 2));          /* clear BEV, ERL */
-        __asm__ volatile("mtc0 %0, $12\n\t.set push\n\t.set noreorder\n\tnop\n\tnop\n\t.set pop" : : "r"(sr));
-
-        UINT64 sp_val;
-        __asm__ volatile("move %0, $sp" : "=r"(sp_val));
-        /* Convert low physical SP to kseg0 address */
-        if (sp_val < 0x20000000ULL) {
-            sp_val |= 0xFFFFFFFF80000000ULL;
-            __asm__ volatile("move $sp, %0" : : "r"(sp_val));
-        }
-    }
 #endif
 
 #if defined(__loongarch64) || defined(__loongarch__)

@@ -1,10 +1,11 @@
 /*
  * VirtIO input (PCI): keyboard and relative mouse for QEMU virt-class machines.
- * LoongArch / AArch64 / RISC-V / MIPS have no PS/2; USB HID is not implemented,
+ * LoongArch / AArch64 / RISC-V have no PS/2; USB HID is not implemented,
  * so virtio-keyboard-pci + virtio-mouse-pci supply desktop input.
  */
 
 #include "virtio_input.h"
+#include "virtio_pci_helpers.h"
 #include "hid.h"
 #include "pci.h"
 #include "../klog.h"
@@ -109,7 +110,6 @@ static inline uint32_t vr32(volatile uint8_t *b, uint32_t o) { return *(volatile
 static inline void vw8(volatile uint8_t *b, uint32_t o, uint8_t v)   { *(volatile uint8_t *)(b + o) = v; }
 static inline void vw16(volatile uint8_t *b, uint32_t o, uint16_t v) { *(volatile uint16_t *)(b + o) = v; }
 static inline void vw32(volatile uint8_t *b, uint32_t o, uint32_t v) { *(volatile uint32_t *)(b + o) = v; }
-static inline void vw64(volatile uint8_t *b, uint32_t o, uint64_t v) { *(volatile uint64_t *)(b + o) = v; }
 
 #define CC_DEVICE_FEATURE_SEL  0x00
 #define CC_DEVICE_FEATURE      0x04
@@ -249,6 +249,8 @@ static bool vi_parse_caps(pci_device_t *dev, struct vi_softc *s)
 
 static void vi_vq_kick(struct vi_softc *s)
 {
+    /* Full barrier before notify so weak ISAs see avail/descriptor writes first. */
+    __sync_synchronize();
     vw16(s->notify_base, (uint32_t)s->evq.notify_off * s->notify_off_mult, 0);
     __sync_synchronize();
 }
@@ -285,9 +287,9 @@ static int vi_alloc_evq(struct vi_softc *s, pci_device_t *dev)
     q->notify_off = vr16(cc, CC_QUEUE_NOTIFY_OFF);
     q->last_used_idx = 0;
 
-    vw64(cc, CC_QUEUE_DESC,   q->desc_phys);
-    vw64(cc, CC_QUEUE_DRIVER, q->avail_phys);
-    vw64(cc, CC_QUEUE_DEVICE, q->used_phys);
+    virtio_pci_common_cfg_write64(cc, CC_QUEUE_DESC,   q->desc_phys);
+    virtio_pci_common_cfg_write64(cc, CC_QUEUE_DRIVER, q->avail_phys);
+    virtio_pci_common_cfg_write64(cc, CC_QUEUE_DEVICE, q->used_phys);
     vw16(cc, CC_QUEUE_ENABLE, 1);
     (void)dev;
     return 0;
@@ -359,6 +361,7 @@ static bool vi_setup_pci_device(pci_device_t *dev, struct vi_softc *s)
     }
     __sync_synchronize();
     q->avail->idx = q->size;
+    __sync_synchronize();
     q->last_used_idx = 0;
     vi_vq_kick(s);
 

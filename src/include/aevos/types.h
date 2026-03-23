@@ -59,8 +59,6 @@ static inline void arch_spin_hint_inline(void) {
     __asm__ volatile("nop");
 #elif defined(__loongarch64)
     __asm__ volatile("nop");
-#elif defined(__mips64)
-    __asm__ volatile("nop");
 #endif
 }
 
@@ -94,3 +92,5 @@ static inline bool spin_try_lock(spinlock_t *lock) {
 #define EISDIR          12
 #define ENOTDIR         13
 #define EROFS           14
+#define ETIMEDOUT       15
+#define ENOTFOUND       16

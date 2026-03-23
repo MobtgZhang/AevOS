@@ -3,6 +3,7 @@
  */
 
 #include "virtio_net.h"
+#include "virtio_pci_helpers.h"
 #include "pci.h"
 #include "../klog.h"
 #include "../mm/pmm.h"
@@ -91,7 +92,6 @@ static inline uint32_t vr32(volatile uint8_t *b, uint32_t o) { return *(volatile
 static inline void vw8(volatile uint8_t *b, uint32_t o, uint8_t v)  { *(volatile uint8_t *)(b + o) = v; }
 static inline void vw16(volatile uint8_t *b, uint32_t o, uint16_t v) { *(volatile uint16_t *)(b + o) = v; }
 static inline void vw32(volatile uint8_t *b, uint32_t o, uint32_t v) { *(volatile uint32_t *)(b + o) = v; }
-static inline void vw64(volatile uint8_t *b, uint32_t o, uint64_t v) { *(volatile uint64_t *)(b + o) = v; }
 
 #define CC_DEVICE_FEATURE_SEL  0x00
 #define CC_DEVICE_FEATURE      0x04
@@ -234,9 +234,9 @@ static int alloc_vq(pci_device_t *dev, uint16_t qidx, struct vq *vq)
     vq->notify_off = vr16(vn.common_cfg, CC_QUEUE_NOTIFY_OFF);
     vq->last_used_idx = 0;
 
-    vw64(vn.common_cfg, CC_QUEUE_DESC,   vq->desc_phys);
-    vw64(vn.common_cfg, CC_QUEUE_DRIVER, vq->avail_phys);
-    vw64(vn.common_cfg, CC_QUEUE_DEVICE, vq->used_phys);
+    virtio_pci_common_cfg_write64(vn.common_cfg, CC_QUEUE_DESC,   vq->desc_phys);
+    virtio_pci_common_cfg_write64(vn.common_cfg, CC_QUEUE_DRIVER, vq->avail_phys);
+    virtio_pci_common_cfg_write64(vn.common_cfg, CC_QUEUE_DEVICE, vq->used_phys);
     vw16(vn.common_cfg, CC_QUEUE_ENABLE, 1);
 
     (void)dev;
@@ -245,6 +245,7 @@ static int alloc_vq(pci_device_t *dev, uint16_t qidx, struct vq *vq)
 
 static void vq_kick(struct vq *vq)
 {
+    __sync_synchronize();
     vw16(vn.notify_base, (uint32_t)vq->notify_off * vn.notify_off_mult, 0);
     __sync_synchronize();
 }
@@ -465,6 +466,7 @@ int virtio_net_init(void)
     vn.iface.ip       = IP4(10, 0, 2, 15);
     vn.iface.netmask  = IP4(255, 255, 255, 0);
     vn.iface.gateway  = IP4(10, 0, 2, 2);
+    vn.iface.dns4     = IP4(10, 0, 2, 3); /* QEMU user-net DNS */
     vn.iface.is_up    = true;
     vn.iface.send_raw = vn_send_raw;
     vn.iface.recv_raw = vn_recv_raw;
@@ -472,6 +474,8 @@ int virtio_net_init(void)
     vw8(vn.common_cfg, CC_DEVICE_STATUS,
         VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER |
         VIRTIO_STATUS_FEATURES_OK | VIRTIO_STATUS_DRIVER_OK);
+
+    net_iface_ipv6_linklocal_from_mac(&vn.iface);
 
     vn.ready = true;
     net_set_interface(&vn.iface);

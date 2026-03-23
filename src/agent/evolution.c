@@ -167,7 +167,7 @@ int agent_evolve_skill(struct agent *agent, const char *task_desc) {
     char generated_code[8192];
     memset(generated_code, 0, sizeof(generated_code));
 
-    if (agent->llm) {
+    if (agent->llm && llm_is_local_loaded(agent->llm)) {
         int gen = llm_infer(agent->llm, prompt, generated_code, sizeof(generated_code));
         if (gen <= 0) {
             klog("evolve: LLM failed to generate code\n");
@@ -176,7 +176,7 @@ int agent_evolve_skill(struct agent *agent, const char *task_desc) {
             return -EIO;
         }
     } else {
-        klog("evolve: no LLM context available\n");
+        klog("evolve: no local GGUF loaded (use: llm load)\n");
         agent->state = AGENT_IDLE;
         return -ENOTSUP;
     }

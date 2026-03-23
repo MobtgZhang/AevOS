@@ -59,6 +59,8 @@ uint64_t memory_store(memory_engine_t *engine, const void *content,
                       float importance);
 int      memory_retrieve(memory_engine_t *engine, const int8_t *query_embedding,
                          uint32_t top_k, mem_result_t *results);
+/* Copy UTF-8/text content for a store id (for HMS compressed context). */
+int      memory_fetch_by_id(memory_engine_t *engine, uint64_t id, char *buf, size_t buf_max);
 void     memory_update_importance(memory_engine_t *engine, uint64_t id,
                                   float new_importance);
 

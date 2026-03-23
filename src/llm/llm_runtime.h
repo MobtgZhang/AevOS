@@ -37,6 +37,8 @@ typedef struct llm_ctx {
     float         *v_cache;
     llm_weights_t  weights;
     size_t         weights_size;
+    /* Owning GGUF handle (tensor pointers live in its blob); gguf_close in llm_free. */
+    void          *gguf_handle;
     uint32_t       pos;
     bool           has_new_token;
     char           last_token_text[256];
@@ -53,8 +55,15 @@ typedef struct llm_ctx {
 
 typedef void (*token_cb_t)(int token, const char *text, void *userdata);
 
+/* model_path NULL or empty: stub context only (no GGUF); load later via llm_reload from UI. */
 int  llm_init(llm_ctx_t *ctx, const char *model_path);
 void llm_free(llm_ctx_t *ctx);
+
+bool llm_is_local_loaded(const llm_ctx_t *ctx);
+int  llm_reload(llm_ctx_t *ctx, const char *model_path);
+
+void     llm_kernel_register_singleton(llm_ctx_t *ctx);
+llm_ctx_t *llm_kernel_singleton(void);
 void llm_reset(llm_ctx_t *ctx);
 
 int llm_decode(llm_ctx_t *ctx, int token_id, float *logits);

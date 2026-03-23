@@ -4,6 +4,12 @@
 #include <aevos/config.h>
 #include <aevos/boot_info.h>
 
+/*
+ * L1 地址空间不变量（ideas2）：凡内核约定为「有效」的虚拟地址（含 PHYS_MAP_BASE
+ * 线性映射、内核高半部、按需映射的 MMIO），须在页表（或 DMW/xkphys）中可访问。
+ * vmm_map_page / vmm_init 的职责即维护该性质。
+ */
+
 /* ── Page-table entry flags ──────────────────────────── */
 
 #if defined(__x86_64__)

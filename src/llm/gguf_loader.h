@@ -88,9 +88,12 @@ typedef struct {
     uint64_t            data_offset;
     uint8_t            *file_data;
     size_t              file_size;
+    /* If non-NULL, gguf_close() kfree()s this (whole file read from VFS). */
+    uint8_t            *heap_data;
 } gguf_file_t;
 
 gguf_file_t        *gguf_open(const char *path);
+gguf_file_t        *gguf_parse(const uint8_t *data, size_t size);
 void                gguf_close(gguf_file_t *file);
 gguf_kv_t          *gguf_get_kv(gguf_file_t *file, const char *key);
 void               *gguf_get_tensor(gguf_file_t *file, const char *name);

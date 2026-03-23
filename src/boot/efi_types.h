@@ -46,6 +46,7 @@ typedef UINTN               EFI_TPL;
 #define EFI_INVALID_PARAMETER    EFI_ERROR(2)
 #define EFI_UNSUPPORTED          EFI_ERROR(3)
 #define EFI_BUFFER_TOO_SMALL     EFI_ERROR(5)
+#define EFI_OUT_OF_RESOURCES     EFI_ERROR(9)
 #define EFI_NOT_FOUND            EFI_ERROR(14)
 
 #define NULL_HANDLE ((EFI_HANDLE)0)

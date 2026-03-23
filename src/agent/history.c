@@ -17,7 +17,8 @@ void history_init(history_t *h, uint32_t max_tokens) {
     memset(h, 0, sizeof(*h));
     h->max_tokens = max_tokens;
     h->lock = SPINLOCK_INIT;
-    klog("history: ring buffer active; B+ dual-key + WAL → history_wal / future index\n");
+    hist_bpt_init(&h->bpt);
+    klog("history: ring + B+ index (seq→slot); WAL → history_wal / future\n");
 }
 
 /* Free compressed data owned by an entry */
@@ -67,10 +68,17 @@ int history_push(history_t *h, uint8_t role, const char *text) {
     if (final) comp = final;
 
     /* Evict old entries if ring is full or token window exceeded */
-    while (h->head - h->tail >= HIST_RING_SIZE)
+    bool bpt_dirty = false;
+    while (h->head - h->tail >= HIST_RING_SIZE) {
         evict_oldest(h);
-    while (h->window_tokens + tok_cnt > h->max_tokens && h->head > h->tail)
+        bpt_dirty = true;
+    }
+    while (h->window_tokens + tok_cnt > h->max_tokens && h->head > h->tail) {
         evict_oldest(h);
+        bpt_dirty = true;
+    }
+    if (bpt_dirty)
+        hist_bpt_rebuild(&h->bpt, h);
 
     /* Insert new entry */
     uint32_t idx = h->head % HIST_RING_SIZE;
@@ -80,6 +88,7 @@ int history_push(history_t *h, uint8_t role, const char *text) {
     entry_free(e);
 
     e->timestamp   = timer_get_ms();
+    e->seq         = h->next_seq++;
     e->role        = role;
     e->token_count = tok_cnt;
     e->data        = comp;
@@ -88,6 +97,8 @@ int history_push(history_t *h, uint8_t role, const char *text) {
 
     h->head++;
     h->window_tokens += tok_cnt;
+
+    hist_bpt_insert(&h->bpt, e->seq, idx);
 
     spin_unlock(&h->lock);
     return 0;
@@ -163,6 +174,31 @@ uint32_t history_count(history_t *h) {
     return h->head - h->tail;
 }
 
+int history_truncate_keep(history_t *h, uint32_t keep_count) {
+    if (!h) return -EINVAL;
+
+    spin_lock(&h->lock);
+    uint32_t total = h->head - h->tail;
+    if (keep_count >= total) {
+        spin_unlock(&h->lock);
+        return 0;
+    }
+    uint32_t drop = total - keep_count;
+    for (uint32_t i = 0; i < drop; i++) {
+        if (h->head <= h->tail)
+            break;
+        h->head--;
+        uint32_t idx = h->head % HIST_RING_SIZE;
+        hist_entry_t *e = &h->ring[idx];
+        h->window_tokens -= e->token_count;
+        entry_free(e);
+        memset(e, 0, sizeof(*e));
+    }
+    hist_bpt_rebuild(&h->bpt, h);
+    spin_unlock(&h->lock);
+    return 0;
+}
+
 /* ── history_clear ───────────────────────────────────────── */
 
 void history_clear(history_t *h) {
@@ -172,6 +208,8 @@ void history_clear(history_t *h) {
     h->head = 0;
     h->tail = 0;
     h->window_tokens = 0;
+    h->next_seq = 0;
+    hist_bpt_clear(&h->bpt);
     spin_unlock(&h->lock);
 }
 
@@ -179,6 +217,21 @@ void history_clear(history_t *h) {
 
 uint32_t history_get_window_tokens(history_t *h) {
     return h ? h->window_tokens : 0;
+}
+
+uint64_t history_seq_at(history_t *h, uint32_t logical_index) {
+    if (!h)
+        return 0;
+    spin_lock(&h->lock);
+    uint32_t total = h->head - h->tail;
+    if (logical_index >= total) {
+        spin_unlock(&h->lock);
+        return 0;
+    }
+    uint32_t abs_idx = (h->tail + logical_index) % HIST_RING_SIZE;
+    uint64_t s = h->ring[abs_idx].seq;
+    spin_unlock(&h->lock);
+    return s;
 }
 
 /* ── history_search — keyword search across entries ──────── */
@@ -233,7 +286,8 @@ int history_search(history_t *h, const char *keyword,
  *            [data_len 4B][data data_len B]
  */
 
-#define HIST_SERIAL_MAGIC 0x48495354u /* "HIST" */
+#define HIST_SERIAL_MAGIC    0x48495354u /* "HIST" v1 */
+#define HIST_SERIAL_MAGIC_V2 0x32534948u /* "HIS2" v2 + seq + next_seq */
 
 ssize_t history_serialize(history_t *h, void *buf, size_t size) {
     if (!h || !buf) return -EINVAL;
@@ -241,27 +295,29 @@ ssize_t history_serialize(history_t *h, void *buf, size_t size) {
     spin_lock(&h->lock);
     uint32_t count = h->head - h->tail;
 
-    /* Calculate needed size */
-    size_t needed = 16; /* header */
+    /* Calculate needed size (v2: +8 next_seq, +8 seq per entry) */
+    size_t needed = 24; /* magic + count + max + win + next_seq */
     for (uint32_t i = 0; i < count; i++) {
         uint32_t idx = (h->tail + i) % HIST_RING_SIZE;
-        needed += 21 + h->ring[idx].data_len; /* per-entry header + data */
+        needed += 29 + h->ring[idx].data_len;
     }
 
     if (size < needed) { spin_unlock(&h->lock); return (ssize_t)needed; }
 
     uint8_t *p = (uint8_t *)buf;
-    uint32_t magic = HIST_SERIAL_MAGIC;
+    uint32_t magic = HIST_SERIAL_MAGIC_V2;
     memcpy(p, &magic, 4);           p += 4;
     memcpy(p, &count, 4);           p += 4;
     memcpy(p, &h->max_tokens, 4);   p += 4;
     memcpy(p, &h->window_tokens, 4); p += 4;
+    memcpy(p, &h->next_seq, 8);     p += 8;
 
     for (uint32_t i = 0; i < count; i++) {
         uint32_t idx = (h->tail + i) % HIST_RING_SIZE;
         hist_entry_t *e = &h->ring[idx];
 
         memcpy(p, &e->timestamp, 8);   p += 8;
+        memcpy(p, &e->seq, 8);         p += 8;
         *p++ = e->role;
         memcpy(p, &e->token_count, 4); p += 4;
         memcpy(p, &e->raw_len, 4);     p += 4;
@@ -282,7 +338,8 @@ int history_deserialize(history_t *h, const void *buf, size_t size) {
     const uint8_t *p = (const uint8_t *)buf;
     uint32_t magic;
     memcpy(&magic, p, 4); p += 4;
-    if (magic != HIST_SERIAL_MAGIC) return -EINVAL;
+    bool v2 = (magic == HIST_SERIAL_MAGIC_V2);
+    if (magic != HIST_SERIAL_MAGIC && !v2) return -EINVAL;
 
     uint32_t count, max_tok, win_tok;
     memcpy(&count, p, 4);   p += 4;
@@ -291,15 +348,27 @@ int history_deserialize(history_t *h, const void *buf, size_t size) {
 
     history_clear(h);
     h->max_tokens = max_tok;
+    (void)win_tok;
+
+    if (v2) {
+        if ((size_t)(p - (const uint8_t *)buf) + 8 > size)
+            return -EINVAL;
+        memcpy(&h->next_seq, p, 8);
+        p += 8;
+    }
 
     for (uint32_t i = 0; i < count; i++) {
-        if ((size_t)(p - (const uint8_t *)buf) + 21 > size) break;
+        size_t hdr = v2 ? 29 : 21;
+        if ((size_t)(p - (const uint8_t *)buf) + hdr > size) break;
 
-        uint64_t ts;
+        uint64_t ts, seq = 0;
         uint8_t role;
         uint32_t tok_cnt, raw_len, data_len;
 
         memcpy(&ts, p, 8);        p += 8;
+        if (v2) {
+            memcpy(&seq, p, 8);   p += 8;
+        }
         role = *p++;
         memcpy(&tok_cnt, p, 4);   p += 4;
         memcpy(&raw_len, p, 4);   p += 4;
@@ -312,6 +381,7 @@ int history_deserialize(history_t *h, const void *buf, size_t size) {
         entry_free(e);
 
         e->timestamp   = ts;
+        e->seq         = v2 ? seq : h->next_seq++;
         e->role        = role;
         e->token_count = tok_cnt;
         e->raw_len     = raw_len;
@@ -323,6 +393,7 @@ int history_deserialize(history_t *h, const void *buf, size_t size) {
 
         h->head++;
         h->window_tokens += tok_cnt;
+        hist_bpt_insert(&h->bpt, e->seq, idx);
     }
 
     return 0;

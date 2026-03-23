@@ -4,6 +4,7 @@
 #include "kernel/mm/slab.h"
 #include "kernel/klog.h"
 #include "lib/string.h"
+#include "kernel/fs/vfs.h"
 
 /* ── Per-element byte sizes for each quantization type ────────── */
 
@@ -161,26 +162,52 @@ static void read_tensor_info(reader_t *r, gguf_tensor_info_t *ti) {
 /* ── gguf_open ───────────────────────────────────────────────── */
 
 gguf_file_t *gguf_open(const char *path) {
-    (void)path;
+    if (!path || !path[0])
+        return NULL;
 
-    /*
-     * In a real OS we would call the VFS to read the file into memory.
-     * The path parameter would be resolved through the kernel's filesystem
-     * layer. For now this is a placeholder that expects the caller to
-     * provide a pre-loaded buffer via a direct gguf_file_t setup, or
-     * the VFS read to be implemented.
-     *
-     * Placeholder: return NULL signalling "not yet loaded".
-     * The actual loading would look like:
-     *   int fd = vfs_open(path, O_RDONLY);
-     *   size_t sz = vfs_size(fd);
-     *   uint8_t *buf = kmalloc(sz);
-     *   vfs_read(fd, buf, sz);
-     *   vfs_close(fd);
-     * then proceed with parse_gguf(buf, sz).
-     */
-    klog("gguf_open: VFS not yet available for '%s'\n", path);
-    return NULL;
+    vfs_fd_t fd = vfs_open(path, VFS_O_READ);
+    if (fd < 0) {
+        klog("gguf_open: vfs_open failed for '%s' (%d)\n", path, fd);
+        return NULL;
+    }
+
+    vfs_stat_t st;
+    if (vfs_fstat(fd, &st) < 0 || st.type != VFS_FILE || st.size == 0) {
+        vfs_close(fd);
+        klog("gguf_open: fstat failed or empty '%s'\n", path);
+        return NULL;
+    }
+
+    uint8_t *buf = (uint8_t *)kmalloc((size_t)st.size);
+    if (!buf) {
+        vfs_close(fd);
+        return NULL;
+    }
+
+    size_t got = 0;
+    while (got < (size_t)st.size) {
+        ssize_t n = vfs_read(fd, buf + got, (size_t)st.size - got);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+    }
+    vfs_close(fd);
+
+    if (got != (size_t)st.size) {
+        klog("gguf_open: short read '%s' (%llu / %llu)\n", path,
+             (unsigned long long)got, (unsigned long long)st.size);
+        kfree(buf);
+        return NULL;
+    }
+
+    gguf_file_t *gf = gguf_parse(buf, (size_t)st.size);
+    if (!gf) {
+        kfree(buf);
+        return NULL;
+    }
+
+    gf->heap_data = buf;
+    return gf;
 }
 
 /*
@@ -246,6 +273,13 @@ gguf_file_t *gguf_parse(const uint8_t *data, size_t size) {
 
 void gguf_close(gguf_file_t *file) {
     if (!file) return;
+
+    if (file->heap_data) {
+        kfree(file->heap_data);
+        file->heap_data = NULL;
+        file->file_data = NULL;
+        file->file_size = 0;
+    }
 
     for (uint32_t i = 0; i < file->n_kv; i++) {
         if (file->kv_pairs[i].type == GGUF_KV_STRING)

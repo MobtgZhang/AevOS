@@ -70,8 +70,6 @@ boot_info_t *mips64_boot_shim(void)
     bi->fb.pitch  = 0;
     bi->fb.bpp    = 0;
 
-    bi->cfg.model_path[0]  = '\0';
-    bi->cfg.n_ctx          = 512;
     bi->cfg.n_threads      = 1;
     bi->cfg.use_gpu        = 0;
     bi->cfg.target_fps     = 30;

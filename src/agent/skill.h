@@ -2,6 +2,7 @@
 
 #include <aevos/types.h>
 #include <aevos/config.h>
+#include "lib/hashmap.h"
 
 typedef int (*skill_fn_t)(const char *input, char *output, size_t out_max);
 
@@ -42,6 +43,7 @@ typedef struct {
     uint32_t         count;
     uint64_t         next_id;
     skill_dep_node_t dep_graph[MAX_SKILLS];
+    hashmap_t       *registry_by_name;
     spinlock_t       lock;
 } skill_engine_t;
 

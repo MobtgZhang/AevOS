@@ -35,4 +35,5 @@ void quantize_f32_to_q8_0(const float *src, q8_0_block_t *dst, size_t n);
 void dequantize_q8_0_to_f32(const q8_0_block_t *src, float *dst, size_t n);
 
 float vec_dot_q4_0_q8_0(const q4_0_block_t *a, const q8_0_block_t *b, size_t n);
+float vec_dot_q8_0_q8_0(const q8_0_block_t *a, const q8_0_block_t *b, size_t n);
 float vec_dot_q4_k_q8_0(const q4_k_block_t *a, const q8_0_block_t *b, size_t n);

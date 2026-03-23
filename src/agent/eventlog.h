@@ -10,6 +10,11 @@ typedef enum {
     EVLOG_TOOL_RESULT,
     EVLOG_CANCEL,
     EVLOG_ERROR,
+    EVLOG_PLAN_STEP,
+    EVLOG_CORRECT_ROLLBACK,
+    EVLOG_VERIFY,
+    EVLOG_MAILBOX,
+    EVLOG_EVOLVER,
 } eventlog_type_t;
 
 typedef struct {

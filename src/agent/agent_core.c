@@ -1,5 +1,7 @@
 #include "agent_core.h"
+#include "hms_core.h"
 #include "eventlog.h"
+#include "sep_plane.h"
 #include <aevos/llm_syscall.h>
 #include "llm/llm_runtime.h"
 #include "kernel/mm/slab.h"
@@ -72,6 +74,7 @@ agent_t *agent_create(agent_system_t *sys, const char *name) {
 
     skill_init(&agent->skills);
     evolution_init(&agent->evolution);
+    sep_plane_init(&agent->sep);
 
     /* Allocate response buffer */
     agent->response_buf_size = AGENT_RESPONSE_BUF_SIZE;
@@ -146,7 +149,8 @@ agent_t *agent_get_active(agent_system_t *sys) {
 
 /* ── Build prompt from history + memory context ──────────── */
 
-static int build_prompt(agent_t *agent, char *prompt_buf, size_t prompt_max) {
+static int build_prompt(agent_t *agent, const char *latest_user,
+                        char *prompt_buf, size_t prompt_max) {
     size_t pos = 0;
 
     /* System prompt */
@@ -163,12 +167,11 @@ static int build_prompt(agent_t *agent, char *prompt_buf, size_t prompt_max) {
             "- %s: %s\n", s->name, s->description);
     }
 
-    /* Retrieve relevant memories for context */
-    /* (Would use memory_retrieve with the last user message's embedding,
-     *  but for now we include a brief memory summary) */
-    if (agent->memory.count > 0) {
-        pos += (size_t)snprintf(prompt_buf + pos, prompt_max - pos,
-            "\nMemory context (%u entries available):\n", agent->memory.count);
+    /* HMS: B+ History, HNSW Memory + L1/L2/L3 cache, Skill registry — compressed refs */
+    if (pos < prompt_max - 512) {
+        pos += hms_append_compressed_block(&agent->memory, &agent->history,
+            &agent->skills, &agent->hms, latest_user,
+            prompt_buf + pos, prompt_max - pos);
     }
 
     pos += (size_t)snprintf(prompt_buf + pos, prompt_max - pos,
@@ -288,6 +291,9 @@ const char *agent_process_input(agent_t *agent, const char *user_text) {
     agent->state = AGENT_THINKING;
     eventlog_append(EVLOG_USER_INPUT, agent->id, user_text);
 
+    sep_planner_reset(&agent->sep);
+    sep_planner_push(&agent->sep, SEP_STEP_OBS, user_text);
+
     /* Push user input to history */
     history_push(&agent->history, HIST_ROLE_USER, user_text);
 
@@ -300,7 +306,7 @@ const char *agent_process_input(agent_t *agent, const char *user_text) {
         return agent->response_buf;
     }
 
-    build_prompt(agent, prompt_buf, AGENT_PROMPT_BUF_SIZE);
+    build_prompt(agent, user_text, prompt_buf, AGENT_PROMPT_BUF_SIZE);
 
     /* Call LLM inference */
     memset(agent->response_buf, 0, agent->response_buf_size);
@@ -320,8 +326,20 @@ const char *agent_process_input(agent_t *agent, const char *user_text) {
                         gen < 0 ? "err" : "ok");
         agent->tool_state = AGENT_TOOL_READY;
         if (gen < 0) {
-            snprintf(agent->response_buf, agent->response_buf_size,
-                     "[LLM inference error: %d]", gen);
+            if (gen == -ENOTSUP)
+                snprintf(agent->response_buf, agent->response_buf_size,
+                         "[No local model — terminal: llm load <path>]");
+            else
+                snprintf(agent->response_buf, agent->response_buf_size,
+                         "[LLM inference error: %d]", gen);
+        } else {
+            char think[SEP_STEP_TEXT];
+            strncpy(think, agent->response_buf, sizeof(think) - 1);
+            think[sizeof(think) - 1] = '\0';
+            char *nl = strchr(think, '\n');
+            if (nl)
+                *nl = '\0';
+            sep_planner_push(&agent->sep, SEP_STEP_THOUGHT, think);
         }
     } else {
         snprintf(agent->response_buf, agent->response_buf_size,
@@ -340,6 +358,7 @@ const char *agent_process_input(agent_t *agent, const char *user_text) {
         int tool_calls = parse_and_execute_tools(agent, agent->response_buf,
                                                  tool_output, 4096);
         if (tool_calls > 0) {
+            sep_planner_push(&agent->sep, SEP_STEP_ACTION, "tool_round");
             /* Append tool results to history and optionally re-infer */
             history_push(&agent->history, HIST_ROLE_TOOL, tool_output);
         }
@@ -348,6 +367,10 @@ const char *agent_process_input(agent_t *agent, const char *user_text) {
 
     /* Push assistant response to history */
     history_push(&agent->history, HIST_ROLE_ASSISTANT, agent->response_buf);
+
+    sep_planner_log_to_eventlog(agent);
+    if (!sep_verifier_check_history_tail(agent, 12))
+        sep_evolver_on_verify_fail(agent, user_text);
 
     agent->state = AGENT_IDLE;
     return agent->response_buf;
@@ -362,6 +385,20 @@ void agent_cancel_request(agent_t *agent)
     agent->cancel_req = true;
     scheduler_cancel_broadcast_set(true);
     eventlog_append(EVLOG_CANCEL, agent->id, NULL);
+}
+
+void agent_system_cancel_broadcast(agent_system_t *sys)
+{
+    if (!sys)
+        return;
+    spin_lock(&sys->lock);
+    for (uint32_t i = 0; i < sys->count; i++) {
+        if (sys->agents[i])
+            sys->agents[i]->cancel_req = true;
+    }
+    spin_unlock(&sys->lock);
+    scheduler_cancel_broadcast_set(true);
+    eventlog_append(EVLOG_CANCEL, 0, "broadcast");
 }
 
 void agent_tick(agent_t *agent) {

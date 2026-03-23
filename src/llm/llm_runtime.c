@@ -7,6 +7,31 @@
 #include "kernel/klog.h"
 #include "lib/string.h"
 
+static llm_ctx_t *s_llm_singleton;
+
+void llm_kernel_register_singleton(llm_ctx_t *ctx)
+{
+    s_llm_singleton = ctx;
+}
+
+llm_ctx_t *llm_kernel_singleton(void)
+{
+    return s_llm_singleton;
+}
+
+bool llm_is_local_loaded(const llm_ctx_t *ctx)
+{
+    return ctx && ctx->weights.wq != NULL && ctx->weights.wq[0] != NULL;
+}
+
+int llm_reload(llm_ctx_t *ctx, const char *model_path)
+{
+    if (!ctx)
+        return -EINVAL;
+    llm_free(ctx);
+    return llm_init(ctx, model_path);
+}
+
 /* ── Fast math (duplicated locally for inlining) ──────────── */
 
 static float rt_expf(float x) {
@@ -62,18 +87,9 @@ static void qmatvec(float *out, const void *W, const float *x,
         quantize_f32_to_q8_0(x, xq, n_in);
 
         const q8_0_block_t *Wq = (const q8_0_block_t *)W;
-        for (uint32_t r = 0; r < n_out; r++) {
-            float s = 0.0f;
-            for (size_t b = 0; b < blocks_per_row; b++) {
-                float dw = f16_to_f32(Wq[r * blocks_per_row + b].delta);
-                float dx = f16_to_f32(xq[b].delta);
-                int32_t dot = 0;
-                for (int i = 0; i < QK8_0; i++)
-                    dot += (int)Wq[r * blocks_per_row + b].quants[i] * (int)xq[b].quants[i];
-                s += dw * dx * (float)dot;
-            }
-            out[r] = s;
-        }
+        for (uint32_t r = 0; r < n_out; r++)
+            out[r] = vec_dot_q8_0_q8_0(Wq + (size_t)r * blocks_per_row, xq, n_in);
+
         kfree(xq);
     } else {
         /* F32 fallback */
@@ -86,23 +102,25 @@ static void qmatvec(float *out, const void *W, const float *x,
 /* ── llm_init ─────────────────────────────────────────────── */
 
 int llm_init(llm_ctx_t *ctx, const char *model_path) {
-    if (!ctx || !model_path) return -EINVAL;
+    if (!ctx)
+        return -EINVAL;
     memset(ctx, 0, sizeof(*ctx));
 
-    simd_detect();
     ctx->config.use_avx2 = simd_detect();
 
-    /* Try GGUF format first, then SafeTensors */
-    gguf_file_t *gf = gguf_open(model_path);
+    gguf_file_t *gf = NULL;
+    if (model_path && model_path[0])
+        gf = gguf_open(model_path);
     if (gf) {
         int rc = gguf_load_into_ctx(gf, ctx);
         if (rc < 0) {
             gguf_close(gf);
             return rc;
         }
+        ctx->gguf_handle = gf;
     }
 
-    if (!gf) {
+    if (!gf && model_path && model_path[0]) {
         st_file_t *sf = st_open(model_path);
         if (sf) {
             int rc = st_load_into_ctx(sf, ctx);
@@ -113,8 +131,13 @@ int llm_init(llm_ctx_t *ctx, const char *model_path) {
         }
     }
 
-    if (!gf) {
-        /* Minimal default config for testing without a model file */
+    bool want_file  = (model_path && model_path[0]);
+    bool have_model = (gf != NULL) || llm_is_local_loaded(ctx);
+    if (want_file && !have_model)
+        return -ENOENT;
+
+    if (!have_model) {
+        /* Stub: no file requested or empty path — no real weights */
         ctx->config.n_vocab   = 32000;
         ctx->config.n_ctx     = LLM_DEFAULT_CTX;
         ctx->config.n_embd    = 4096;
@@ -150,6 +173,7 @@ int llm_init(llm_ctx_t *ctx, const char *model_path) {
 
 void llm_free(llm_ctx_t *ctx) {
     if (!ctx) return;
+
     kfree(ctx->k_cache);
     kfree(ctx->v_cache);
     kfree(ctx->logits);
@@ -170,6 +194,11 @@ void llm_free(llm_ctx_t *ctx) {
         for (uint32_t i = 0; i < ctx->vocab_size; i++)
             kfree(ctx->vocab[i]);
         kfree(ctx->vocab);
+    }
+
+    if (ctx->gguf_handle) {
+        gguf_close((gguf_file_t *)ctx->gguf_handle);
+        ctx->gguf_handle = NULL;
     }
 
     memset(ctx, 0, sizeof(*ctx));
@@ -220,8 +249,12 @@ int llm_decode(llm_ctx_t *ctx, int token_id, float *out_logits) {
         if (qt == GGUF_TYPE_F32 || qt == 0) {
             const float *emb_table = (const float *)w->token_embd;
             memcpy(x, emb_table + (size_t)token_id * n_embd, n_embd * sizeof(float));
+        } else if (qt == GGUF_TYPE_Q8_0) {
+            const q8_0_block_t *emb_q = (const q8_0_block_t *)w->token_embd;
+            size_t blocks_per_row = n_embd / QK8_0;
+            dequantize_q8_0_to_f32(emb_q + (size_t)token_id * blocks_per_row, x, n_embd);
         } else {
-            /* Quantized embedding: dequantize the row */
+            /* Q4_0 embedding row */
             const q4_0_block_t *emb_q = (const q4_0_block_t *)w->token_embd;
             size_t blocks_per_row = n_embd / QK4_0;
             dequantize_q4_0_to_f32(emb_q + (size_t)token_id * blocks_per_row, x, n_embd);

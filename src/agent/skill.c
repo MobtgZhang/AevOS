@@ -12,6 +12,7 @@ void skill_init(skill_engine_t *engine) {
     memset(engine, 0, sizeof(*engine));
     engine->next_id = 1;
     engine->lock = SPINLOCK_INIT;
+    engine->registry_by_name = hashmap_create(64);
 }
 
 void skill_destroy(skill_engine_t *engine) {
@@ -22,6 +23,10 @@ void skill_destroy(skill_engine_t *engine) {
             kfree(engine->skills[i].elf_handle);
     }
     engine->count = 0;
+    if (engine->registry_by_name) {
+        hashmap_destroy(engine->registry_by_name);
+        engine->registry_by_name = NULL;
+    }
     spin_unlock(&engine->lock);
 }
 
@@ -63,7 +68,10 @@ skill_t *skill_register(skill_engine_t *engine, skill_fn_t fn,
     s->version = 1;
     s->active = true;
 
+    uint32_t slot = engine->count;
     engine->count++;
+    if (engine->registry_by_name)
+        hashmap_put(engine->registry_by_name, name, (void *)(uintptr_t)slot);
     spin_unlock(&engine->lock);
 
     klog("skill: registered '%s' (id=%llu)\n", name, (unsigned long long)s->id);
@@ -78,6 +86,8 @@ int skill_unregister(skill_engine_t *engine, uint64_t skill_id) {
     for (uint32_t i = 0; i < engine->count; i++) {
         if (engine->skills[i].id == skill_id) {
             klog("skill: unregistered '%s'\n", engine->skills[i].name);
+            if (engine->registry_by_name)
+                hashmap_remove(engine->registry_by_name, engine->skills[i].name);
             if (engine->skills[i].elf_handle)
                 kfree(engine->skills[i].elf_handle);
             engine->skills[i].active = false;
@@ -93,6 +103,15 @@ int skill_unregister(skill_engine_t *engine, uint64_t skill_id) {
 
 skill_t *skill_find_by_name(skill_engine_t *engine, const char *name) {
     if (!engine || !name) return NULL;
+    if (engine->registry_by_name) {
+        void *v = hashmap_get(engine->registry_by_name, name);
+        if (v) {
+            uint32_t idx = (uint32_t)(uintptr_t)v;
+            if (idx < engine->count && engine->skills[idx].active
+                && strcmp(engine->skills[idx].name, name) == 0)
+                return &engine->skills[idx];
+        }
+    }
     for (uint32_t i = 0; i < engine->count; i++) {
         if (engine->skills[i].active && strcmp(engine->skills[i].name, name) == 0)
             return &engine->skills[i];
@@ -283,6 +302,8 @@ int skill_auto_retire(skill_engine_t *engine) {
         if (s->success_rate < SKILL_SUCCESS_THRESHOLD) {
             klog("skill: retiring '%s' (rate=%.2f%%)\n",
                  s->name, s->success_rate * 100.0f);
+            if (engine->registry_by_name)
+                hashmap_remove(engine->registry_by_name, s->name);
             s->active = false;
             s->fn = NULL;
             if (s->elf_handle) { kfree(s->elf_handle); s->elf_handle = NULL; }
@@ -382,6 +403,15 @@ int skill_deserialize(skill_engine_t *engine, const void *buf, size_t size) {
         s->fn = NULL;
         s->active = true;
         engine->count++;
+    }
+
+    if (engine->registry_by_name) {
+        hashmap_clear(engine->registry_by_name);
+        for (uint32_t i = 0; i < engine->count; i++) {
+            if (engine->skills[i].active)
+                hashmap_put(engine->registry_by_name, engine->skills[i].name,
+                            (void *)(uintptr_t)i);
+        }
     }
 
     return 0;

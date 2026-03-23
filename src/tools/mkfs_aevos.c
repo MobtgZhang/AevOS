@@ -571,8 +571,6 @@ static void write_fat32_esp(uint64_t esp_start_lba, uint64_t esp_sectors,
     const char *boot_json =
         "{\n"
         "  \"kernel\": \"kernel.elf\",\n"
-        "  \"model\": \"model.gguf\",\n"
-        "  \"n_ctx\": 32768,\n"
         "  \"n_threads\": 4,\n"
         "  \"use_gpu\": false,\n"
         "  \"target_fps\": 60,\n"

@@ -30,6 +30,46 @@ static uint64_t alloc_table(void) {
     return paddr;
 }
 
+#if defined(__riscv)
+/* Sv48：非叶仅 V；叶须 V+R+W+X（与 efi_main RV_PTE_* 一致） */
+#define RV_PTE_V  (1ULL << 0)
+#define RV_PTE_R  (1ULL << 1)
+#define RV_PTE_W  (1ULL << 2)
+#define RV_PTE_X  (1ULL << 3)
+#define RV_PTE_U  (1ULL << 4)
+#define RV_PTE_G  (1ULL << 5)
+#define RV_PTE_A  (1ULL << 6)
+#define RV_PTE_D  (1ULL << 7)
+
+static inline bool rv_pte_is_leaf(uint64_t pte)
+{
+    return (pte & RV_PTE_V) && (pte & (RV_PTE_R | RV_PTE_W | RV_PTE_X));
+}
+
+static inline uint64_t rv_pte_table_phys(uint64_t pte)
+{
+    return (pte >> 10) << 12;
+}
+
+static inline uint64_t rv_make_table_pte(uint64_t table_phys)
+{
+    return ((table_phys >> 12) << 10) | RV_PTE_V;
+}
+
+static inline uint64_t rv_make_leaf_pte_2m(uint64_t phys, uint64_t flags, bool with_exec)
+{
+    uint64_t a = ((phys >> 12) << 10) | RV_PTE_V | RV_PTE_R | RV_PTE_W | RV_PTE_A | RV_PTE_D;
+    /*
+     * MMIO 叶项勿设 G：部分核上 Global+设备叶与 I/O 访问组合会异常；可执行 RAM 再带 G。
+     */
+    if (with_exec)
+        a |= RV_PTE_X | RV_PTE_G;
+    if (flags & PTE_USER)
+        a |= RV_PTE_U;
+    return a;
+}
+#endif /* __riscv */
+
 /*
  * Walk page tables for `vaddr`, optionally creating missing
  * intermediate tables.  Returns a pointer to the final PTE,
@@ -51,6 +91,9 @@ static uint64_t *vmm_walk(vmm_ctx_t *ctx, uint64_t vaddr, bool create) {
         /* ARM64 block descriptor: valid=1, table=0 → bits[1:0]=01 */
         if ((entry & 3) == 1)
             return &table[indices[level]];
+#elif defined(__riscv)
+        if (rv_pte_is_leaf(entry))
+            return &table[indices[level]];
 #else
         if (entry & PTE_HUGE)
             return &table[indices[level]]; /* 2 MB / 1 GB page */
@@ -66,6 +109,8 @@ static uint64_t *vmm_walk(vmm_ctx_t *ctx, uint64_t vaddr, bool create) {
 
 #if defined(__aarch64__)
             table[indices[level]] = new_table | ARM64_TABLE_DESC;
+#elif defined(__riscv)
+            table[indices[level]] = rv_make_table_pte(new_table);
 #else
             table[indices[level]] = new_table | PTE_PRESENT
                                               | PTE_WRITABLE
@@ -74,7 +119,11 @@ static uint64_t *vmm_walk(vmm_ctx_t *ctx, uint64_t vaddr, bool create) {
             entry = table[indices[level]];
         }
 
+#if defined(__riscv)
+        table = ptov(rv_pte_table_phys(entry));
+#else
         table = ptov(entry & PTE_ADDR_MASK);
+#endif
     }
 
     /* `table` now points to the PT level */
@@ -86,8 +135,15 @@ static uint64_t *vmm_walk(vmm_ctx_t *ctx, uint64_t vaddr, bool create) {
 void vmm_map_page(vmm_ctx_t *ctx, uint64_t vaddr, uint64_t paddr,
                    uint64_t flags) {
     uint64_t *pte = vmm_walk(ctx, vaddr, true);
-    if (pte)
-        *pte = (paddr & PTE_ADDR_MASK) | (flags & ~PTE_ADDR_MASK);
+    if (!pte)
+        return;
+#if defined(__riscv)
+    (void)vaddr;
+    *pte = ((paddr >> 12) << 10) | RV_PTE_V | RV_PTE_R | RV_PTE_W | RV_PTE_X
+           | RV_PTE_G | RV_PTE_A | RV_PTE_D | ((flags & PTE_USER) ? RV_PTE_U : 0);
+#else
+    *pte = (paddr & PTE_ADDR_MASK) | (flags & ~PTE_ADDR_MASK);
+#endif
 }
 
 void vmm_unmap_page(vmm_ctx_t *ctx, uint64_t vaddr) {
@@ -105,12 +161,17 @@ uint64_t vmm_get_phys(vmm_ctx_t *ctx, uint64_t vaddr) {
 
 #if defined(__aarch64__)
     if ((*pte & 3) == 1)  /* block descriptor */
+        return (*pte & PTE_ADDR_MASK) | (vaddr & 0x1FFFFF);
+#elif defined(__riscv)
+    if (rv_pte_is_leaf(*pte))
+        return rv_pte_table_phys(*pte) | (vaddr & 0x1FFFFF);
+    return rv_pte_table_phys(*pte) | (vaddr & 0xFFF);
 #else
     if (*pte & PTE_HUGE)
-#endif
         return (*pte & PTE_ADDR_MASK) | (vaddr & 0x1FFFFF);
 
     return (*pte & PTE_ADDR_MASK) | (vaddr & 0xFFF);
+#endif
 }
 
 void vmm_switch(vmm_ctx_t *ctx) {
@@ -122,7 +183,7 @@ void vmm_switch(vmm_ctx_t *ctx) {
 #if !defined(__loongarch64)
 static void map_huge_range(vmm_ctx_t *ctx, uint64_t vbase,
                            uint64_t pbase, uint64_t size,
-                           uint64_t flags) {
+                           uint64_t flags, bool riscv_leaf_exec) {
     uint64_t *pml4 = ctx->pml4;
     uint64_t end = pbase + size;
 
@@ -134,28 +195,43 @@ static void map_huge_range(vmm_ctx_t *ctx, uint64_t vbase,
             uint64_t t = alloc_table();
 #if defined(__aarch64__)
             pml4[p4] = t | ARM64_TABLE_DESC;
+#elif defined(__riscv)
+            pml4[p4] = rv_make_table_pte(t);
 #else
             pml4[p4] = t | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
 #endif
         }
+#if defined(__riscv)
+        uint64_t *pdpt = ptov(rv_pte_table_phys(pml4[p4]));
+#else
         uint64_t *pdpt = ptov(pml4[p4] & PTE_ADDR_MASK);
+#endif
 
         int p3 = (int)PDPT_INDEX(vaddr);
         if (!(pdpt[p3] & PTE_PRESENT)) {
             uint64_t t = alloc_table();
 #if defined(__aarch64__)
             pdpt[p3] = t | ARM64_TABLE_DESC;
+#elif defined(__riscv)
+            pdpt[p3] = rv_make_table_pte(t);
 #else
             pdpt[p3] = t | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
 #endif
         }
+#if defined(__riscv)
+        uint64_t *pd = ptov(rv_pte_table_phys(pdpt[p3]));
+#else
         uint64_t *pd = ptov(pdpt[p3] & PTE_ADDR_MASK);
+#endif
 
         int p2 = (int)PD_INDEX(vaddr);
 #if defined(__aarch64__)
         pd[p2] = phys | ((flags & PTE_NO_CACHE) ? ARM64_BLOCK_DEVICE
                                                  : ARM64_BLOCK_NORMAL);
+#elif defined(__riscv)
+        pd[p2] = rv_make_leaf_pte_2m(phys, flags, riscv_leaf_exec);
 #else
+        (void)riscv_leaf_exec;
         pd[p2] = phys | flags | PTE_HUGE;
 #endif
     }
@@ -197,7 +273,7 @@ void vmm_init(boot_info_t *bi) {
 #else
     /* Identity map first 4 GB (physical == virtual) for boot transition */
     map_huge_range(&kernel_ctx, 0, 0,
-                   4ULL * 1024 * 1024 * 1024, flags);
+                   4ULL * 1024 * 1024 * 1024, flags, true);
 #endif
 
     /* Direct physical map at PHYS_MAP_BASE (kernel high-half access) */
@@ -208,12 +284,12 @@ void vmm_init(boot_info_t *bi) {
      */
     map_huge_range(&kernel_ctx, PHYS_MAP_BASE, 0,
                    1ULL * 1024 * 1024 * 1024,
-                   flags | PTE_NO_CACHE);
+                   flags | PTE_NO_CACHE, true);
     map_huge_range(&kernel_ctx,
                    PHYS_MAP_BASE + 1ULL * 1024 * 1024 * 1024,
                    1ULL * 1024 * 1024 * 1024,
                    map_size - 1ULL * 1024 * 1024 * 1024,
-                   flags);
+                   flags, true);
 
     /*
      * PCI ECAM: QEMU virt (highmem=on) places ECAM at 0x4010000000.
@@ -224,7 +300,7 @@ void vmm_init(boot_info_t *bi) {
                    PHYS_MAP_BASE + PCI_ECAM_PHYS,
                    PCI_ECAM_PHYS,
                    ALIGN_UP(PCI_ECAM_SIZE, 0x200000),
-                   flags | PTE_NO_CACHE);
+                   flags | PTE_NO_CACHE, true);
 #endif
     /*
      * 64-bit PCI MMIO window for BARs (e.g. virtio-gpu config).
@@ -234,10 +310,10 @@ void vmm_init(boot_info_t *bi) {
                    PHYS_MAP_BASE + PCI_MMIO64_PHYS,
                    PCI_MMIO64_PHYS,
                    ALIGN_UP(PCI_MMIO64_SIZE, 0x200000),
-                   flags | PTE_NO_CACHE);
+                   flags | PTE_NO_CACHE, true);
 #endif
 #else
-    map_huge_range(&kernel_ctx, PHYS_MAP_BASE, 0, map_size, flags);
+    map_huge_range(&kernel_ctx, PHYS_MAP_BASE, 0, map_size, flags, true);
 #if defined(__x86_64__)
     /*
      * QEMU / PC 固件常把 64-bit PCI BAR（virtio 1.0 modern）放在物理地址 ≥4G
@@ -248,7 +324,7 @@ void vmm_init(boot_info_t *bi) {
                    PHYS_MAP_BASE + AEVOS_X86_PCI_MMIO64_PHYS_LO,
                    AEVOS_X86_PCI_MMIO64_PHYS_LO,
                    AEVOS_X86_PCI_MMIO64_PHYS_SZ,
-                   flags | PTE_NO_CACHE);
+                   flags | PTE_NO_CACHE, true);
 #endif
 #endif
 
@@ -263,7 +339,7 @@ void vmm_init(boot_info_t *bi) {
             fb_size = 0x200000;
 
         map_huge_range(&kernel_ctx, FRAMEBUFFER_VBASE, fb_phys,
-                       fb_size, flags | PTE_NO_CACHE);
+                       fb_size, flags | PTE_NO_CACHE, true);
     }
 
     /* Activate the new address space */
@@ -356,29 +432,57 @@ void vmm_destroy_ctx(vmm_ctx_t *ctx) {
 #if defined(__aarch64__)
         if ((pml4[i4] & 3) == 1) continue;   /* skip block descriptors */
 #endif
+#if defined(__riscv)
+        if (rv_pte_is_leaf(pml4[i4]))
+            continue;
+        uint64_t *pdpt = PHYS_TO_VIRT(rv_pte_table_phys(pml4[i4]));
+#else
         uint64_t *pdpt = PHYS_TO_VIRT(pml4[i4] & PTE_ADDR_MASK);
+#endif
         for (int i3 = 0; i3 < 512; i3++) {
             if (!(pdpt[i3] & PTE_PRESENT))
                 continue;
 #if defined(__aarch64__)
             if ((pdpt[i3] & 3) == 1) continue;
+#elif defined(__riscv)
+            if (rv_pte_is_leaf(pdpt[i3]))
+                continue;
 #else
             if (pdpt[i3] & PTE_HUGE) continue;
 #endif
+#if defined(__riscv)
+            uint64_t *pd = PHYS_TO_VIRT(rv_pte_table_phys(pdpt[i3]));
+#else
             uint64_t *pd = PHYS_TO_VIRT(pdpt[i3] & PTE_ADDR_MASK);
+#endif
             for (int i2 = 0; i2 < 512; i2++) {
                 if (!(pd[i2] & PTE_PRESENT))
                     continue;
 #if defined(__aarch64__)
                 if ((pd[i2] & 3) == 1) continue;
+#elif defined(__riscv)
+                if (rv_pte_is_leaf(pd[i2]))
+                    continue;
 #else
                 if (pd[i2] & PTE_HUGE) continue;
 #endif
+#if defined(__riscv)
+                pmm_free_page(rv_pte_table_phys(pd[i2]));
+#else
                 pmm_free_page(pd[i2] & PTE_ADDR_MASK);
+#endif
             }
+#if defined(__riscv)
+            pmm_free_page(rv_pte_table_phys(pdpt[i3]));
+#else
             pmm_free_page(pdpt[i3] & PTE_ADDR_MASK);
+#endif
         }
+#if defined(__riscv)
+        pmm_free_page(rv_pte_table_phys(pml4[i4]));
+#else
         pmm_free_page(pml4[i4] & PTE_ADDR_MASK);
+#endif
     }
 
     pmm_free_page(ctx->cr3);

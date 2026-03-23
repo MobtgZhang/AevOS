@@ -6,8 +6,14 @@
 #include "../kernel/locale.h"
 #include "../kernel/klog.h"
 #include "../agent/agent_core.h"
+#include "../llm/llm_runtime.h"
 #include "../lib/string.h"
+#include "../container/lc_layer.h"
 #include <aevos/config.h>
+
+/* Ubuntu/GNOME Terminal default palette (purple field, green user@host, blue path). */
+#define TERM_LINUX_BG       0xFF300A24
+#define TERM_CURSOR_W       2
 
 typedef __builtin_va_list va_list;
 #define va_start(ap, last) __builtin_va_start(ap, last)
@@ -106,15 +112,71 @@ void terminal_init(terminal_t *term, rect_t bounds)
 
     term_env_set(term, "HOME", "/workspace");
     term_env_set(term, "USER", "aevos");
+    term_env_set(term, "HOSTNAME", "aevos-pc");
     term_env_set(term, "SHELL", "/bin/bash");
     term_env_set(term, "PATH", "/bin:/usr/bin:/sandbox/bin");
     term_env_set(term, "PWD", term->cwd);
-    term_env_set(term, "PS1", "\\u@AevOS:\\w\\$ ");
+    term_env_set(term, "PS1", "\\u@\\h: ");
 
-    terminal_print(term, "AevOS Terminal v0.6.0 (bash-like subset)");
-    terminal_print(term, "Virtual roots: /workspace, /sandbox, /tmp");
+    term->scroll_follow_bottom = true;
+
+    terminal_print(term, "AevOS shell: line is USER@HOST: <cmd>; then output; prompt repeats below.");
+    terminal_print(term, "export USER / HOSTNAME to change prompt. PgUp/PgDn scroll. F3: chat/term focus.");
     terminal_print(term, "Type 'help' for commands.");
     terminal_print(term, "");
+}
+
+static int term_content_height_px(terminal_t *term, int *line_h_out,
+                                  int *output_area_h_out, int *visible_lines_out)
+{
+    const font_t *fnt = font_get_default();
+    int line_h = fnt->height;
+    /* Full inner height; current prompt+input is the last logical line (like a real TTY). */
+    int output_area_h = term->bounds.h - PADDING * 2;
+    if (output_area_h < line_h)
+        output_area_h = line_h;
+    int vis = output_area_h / line_h;
+    if (vis < 1)
+        vis = 1;
+    if (line_h_out)
+        *line_h_out = line_h;
+    if (output_area_h_out)
+        *output_area_h_out = output_area_h;
+    if (visible_lines_out)
+        *visible_lines_out = vis;
+    return (term->line_count + 1) * line_h;
+}
+
+static int term_max_scroll_px(terminal_t *term)
+{
+    int lh, oah, vis;
+    int total = term_content_height_px(term, &lh, &oah, &vis);
+    int m = total - oah;
+    return m > 0 ? m : 0;
+}
+
+static void terminal_clamp_scroll(terminal_t *term)
+{
+    int m = term_max_scroll_px(term);
+    if (term->scroll_offset < 0)
+        term->scroll_offset = 0;
+    if (term->scroll_offset > m)
+        term->scroll_offset = m;
+}
+
+static void terminal_sync_scroll_after_line(terminal_t *term)
+{
+    int m = term_max_scroll_px(term);
+    if (term->scroll_follow_bottom)
+        term->scroll_offset = m;
+    else if (term->scroll_offset > m)
+        term->scroll_offset = m;
+}
+
+static void terminal_scroll_to_bottom(terminal_t *term)
+{
+    term->scroll_follow_bottom = true;
+    term->scroll_offset = term_max_scroll_px(term);
 }
 
 static void terminal_add_line(terminal_t *term, const char *text,
@@ -139,6 +201,7 @@ static void terminal_add_line(terminal_t *term, const char *text,
         line->fg_colors[i] = color;
 
     term->line_count++;
+    terminal_sync_scroll_after_line(term);
 }
 
 void terminal_print(terminal_t *term, const char *text)
@@ -490,12 +553,70 @@ static void term_expand_vars(terminal_t *term, const char *in,
     }
 }
 
+/* One line: "USER@HOST: " only (what you type follows on the same logical line). */
 static void term_format_prompt(terminal_t *term, char *buf, size_t cap)
 {
     const char *user = term_env_get(term, "USER");
     if (!user || !user[0])
         user = "aevos";
-    snprintf(buf, cap, "%s@AevOS:%s$ ", user, term->cwd);
+    const char *host = term_env_get(term, "HOSTNAME");
+    if (!host || !host[0])
+        host = "aevos-pc";
+    snprintf(buf, cap, "%s@%s: ", user, host);
+}
+
+/* Green user@host, then ": " and typed command in normal text */
+static void term_colorize_prompt_command_line(terminal_t *term, terminal_line_t *line)
+{
+    if (!term || !line || line->len <= 0)
+        return;
+
+    char pfx[TERM_LINE_LEN];
+    term_format_prompt(term, pfx, sizeof(pfx));
+    int plen = (int)strlen(pfx);
+    if (line->len < plen || strncmp(line->text, pfx, plen) != 0) {
+        for (int j = 0; j < line->len; j++)
+            line->fg_colors[j] = COLOR_TEXT;
+        return;
+    }
+
+    const char *user = term_env_get(term, "USER");
+    if (!user || !user[0])
+        user = "aevos";
+    const char *host = term_env_get(term, "HOSTNAME");
+    if (!host || !host[0])
+        host = "aevos-pc";
+    int uh = (int)strlen(user) + 1 + (int)strlen(host);
+
+    int i = 0;
+    for (; i < uh && i < line->len; i++)
+        line->fg_colors[i] = COLOR_GREEN;
+    for (; i < plen && i < line->len; i++)
+        line->fg_colors[i] = COLOR_TEXT;
+    for (; i < line->len; i++)
+        line->fg_colors[i] = COLOR_TEXT;
+}
+
+static int term_draw_live_prompt(fb_ctx_t *fb, int x, int y, terminal_t *term,
+                                 const font_t *fnt)
+{
+    const char *user = term_env_get(term, "USER");
+    if (!user || !user[0])
+        user = "aevos";
+    const char *host = term_env_get(term, "HOSTNAME");
+    if (!host || !host[0])
+        host = "aevos-pc";
+
+    int px = x;
+    font_draw_string(fb, px, y, user, COLOR_GREEN, 0, fnt);
+    px += font_measure_string(user, fnt);
+    font_draw_char(fb, px, y, '@', COLOR_GREEN, 0, fnt);
+    px += fnt->width;
+    font_draw_string(fb, px, y, host, COLOR_GREEN, 0, fnt);
+    px += font_measure_string(host, fnt);
+    font_draw_string(fb, px, y, ": ", COLOR_TEXT, 0, fnt);
+    px += font_measure_string(": ", fnt);
+    return px - x;
 }
 
 static void cmd_echo(terminal_t *term, const char *args)
@@ -624,7 +745,7 @@ static void cmd_shell_banner(terminal_t *term, const char *name)
 {
     terminal_printf(term,
                     "Running AevOS shell (bash-like). "
-                    "Requested `%s` — no separate process model in-kernel.",
+                    "Requested `%s` - no separate process model in-kernel.",
                     name);
 }
 
@@ -650,6 +771,10 @@ static void cmd_help(terminal_t *term)
     terminal_print(term, "  history show       - Show conversation history");
     terminal_print(term, "  sysinfo            - Show system information");
     terminal_print(term, "  reboot             - Reboot the system");
+    terminal_print(term, "  llm status         - Local GGUF loaded or stub only");
+    terminal_print(term, "  llm load <path>    - Load model from VFS path");
+    terminal_print(term, "  llm unload         - Release model (stub only)");
+    terminal_print(term, "  docker ...         - LC layer: docker CLI subset (OCI shim)");
 }
 
 static void cmd_sysinfo(terminal_t *term)
@@ -736,6 +861,193 @@ static void cmd_history(terminal_t *term, const char *args)
     terminal_print(term, "  (no history yet)");
 }
 
+static void cmd_docker(terminal_t *term, const char *args)
+{
+    const char *a = skip_ws(args);
+
+    if (*a == '\0' || str_starts_with(a, "help") || str_starts_with(a, "--help")) {
+        terminal_print(term, "docker (LC - Docker CLI compatible subset on AevOS)");
+        terminal_print(term, "  docker version | info");
+        terminal_print(term, "  docker ps      | docker container ls");
+        terminal_print(term, "  docker images");
+        terminal_print(term, "  docker run [-it] <image> [cmd ...]   (OCI shim, no real fork)");
+        terminal_print(term, "  docker stop <id|name>");
+        terminal_print(term, "  docker rm <id|name>   (after stop)");
+        return;
+    }
+
+    if (cmd_word_is(a, "version")) {
+        char buf[384];
+        lc_docker_version(buf, sizeof(buf));
+        terminal_print(term, buf);
+        return;
+    }
+
+    if (cmd_word_is(a, "info")) {
+        char buf[512];
+        lc_docker_info(buf, sizeof(buf));
+        terminal_print(term, buf);
+        return;
+    }
+
+    if (cmd_word_is(a, "ps")) {
+        lc_container_slot_t slots[LC_MAX_CONTAINERS];
+        int n = 0;
+        lc_docker_ps(slots, LC_MAX_CONTAINERS, &n);
+        terminal_print(term,
+                       "CONTAINER ID      NAME          IMAGE           STATE");
+        for (int i = 0; i < n; i++) {
+            const char *st = "created";
+            if (slots[i].state == LC_CTR_RUNNING)
+                st = "running";
+            else if (slots[i].state == LC_CTR_STOPPED)
+                st = "stopped";
+            terminal_printf(term, "%-17s %-13s %-15s %s",
+                            slots[i].id_str, slots[i].name,
+                            slots[i].image, st);
+        }
+        if (n == 0)
+            terminal_print(term, "(no containers)");
+        return;
+    }
+
+    if (str_starts_with(a, "container ")) {
+        const char *sub = skip_ws(a + 9);
+        if (cmd_word_is(sub, "ls") || cmd_word_is(sub, "ps")) {
+            cmd_docker(term, "ps");
+            return;
+        }
+        terminal_print(term, "docker: unknown container subcommand");
+        return;
+    }
+
+    if (cmd_word_is(a, "images")) {
+        char buf[2048];
+        lc_docker_images(buf, sizeof(buf));
+        terminal_print(term, buf);
+        return;
+    }
+
+    if (cmd_word_is(a, "run")) {
+        const char *p = skip_ws(a + 3);
+        char image[LC_IMAGE_NAME_LEN];
+        char rest[TERM_LINE_LEN];
+
+        image[0] = '\0';
+        rest[0] = '\0';
+
+        while (*p) {
+            if (*p == '-') {
+                while (*p && *p != ' ')
+                    p++;
+                p = skip_ws(p);
+                continue;
+            }
+            const char *e = p;
+            while (*e && *e != ' ')
+                e++;
+            size_t il = (size_t)(e - p);
+            if (il >= sizeof(image))
+                il = sizeof(image) - 1;
+            memcpy(image, p, il);
+            image[il] = '\0';
+            p = skip_ws(e);
+            if (*p) {
+                strncpy(rest, p, sizeof(rest) - 1);
+                rest[sizeof(rest) - 1] = '\0';
+            }
+            break;
+        }
+
+        if (!image[0]) {
+            terminal_print(term, "docker: \"docker run\" requires an image argument");
+            return;
+        }
+
+        char msg[512];
+        (void)lc_docker_run(image, rest, msg, sizeof(msg));
+        terminal_print(term, msg);
+        return;
+    }
+
+    if (cmd_word_is(a, "stop")) {
+        const char *id = skip_ws(a + 4);
+        if (!*id) {
+            terminal_print(term, "docker: \"docker stop\" requires a container id or name");
+            return;
+        }
+        char err[192];
+        (void)lc_docker_stop(id, err, sizeof(err));
+        terminal_print(term, err);
+        return;
+    }
+
+    if (cmd_word_is(a, "rm")) {
+        const char *id = skip_ws(a + 2);
+        if (!*id) {
+            terminal_print(term, "docker: \"docker rm\" requires a container id or name");
+            return;
+        }
+        char err[192];
+        (void)lc_docker_rm(id, err, sizeof(err));
+        terminal_print(term, err);
+        return;
+    }
+
+    terminal_printf(term, "docker: unknown command (try `docker help`)");
+}
+
+static void cmd_llm(terminal_t *term, const char *args)
+{
+    llm_ctx_t *ctx = llm_kernel_singleton();
+    if (!ctx) {
+        terminal_print(term, "llm: internal error (no singleton)");
+        return;
+    }
+
+    while (*args == ' ')
+        args++;
+
+    if (args[0] == '\0' || str_starts_with(args, "status")) {
+        if (llm_is_local_loaded(ctx))
+            terminal_printf(term, "llm: local model active (ctx=%u tok)",
+                            (unsigned)ctx->config.n_ctx);
+        else
+            terminal_print(term, "llm: no local model - use: llm load <path>");
+        return;
+    }
+
+    if (str_starts_with(args, "unload")) {
+        int r = llm_reload(ctx, NULL);
+        if (r == 0)
+            terminal_print(term, "llm: unloaded (stub context)");
+        else
+            terminal_printf(term, "llm: unload failed (%d)", r);
+        return;
+    }
+
+    if (str_starts_with(args, "load ")) {
+        const char *p = args + 5;
+        while (*p == ' ')
+            p++;
+        if (*p == '\0') {
+            terminal_print(term, "Usage: llm load <vfs-path-to.gguf>");
+            return;
+        }
+        int r = llm_reload(ctx, p);
+        if (r == 0)
+            terminal_printf(term, "llm: loaded '%s'", p);
+        else {
+            terminal_printf(term, "llm: load failed (%d)", r);
+            (void)llm_reload(ctx, NULL);
+            terminal_print(term, "llm: reverted to stub");
+        }
+        return;
+    }
+
+    terminal_print(term, "Usage: llm [status|load <path>|unload]");
+}
+
 void terminal_execute_command(terminal_t *term, const char *cmd)
 {
     if (!term || !cmd)
@@ -744,6 +1056,8 @@ void terminal_execute_command(terminal_t *term, const char *cmd)
     while (*cmd == ' ') cmd++;
     if (*cmd == '\0')
         return;
+
+    term->scroll_follow_bottom = true;
 
     char work[TERM_LINE_LEN];
     strncpy(work, cmd, sizeof(work) - 1);
@@ -757,7 +1071,10 @@ void terminal_execute_command(terminal_t *term, const char *cmd)
     char pfx[TERM_LINE_LEN];
     term_format_prompt(term, pfx, sizeof(pfx));
     snprintf(prompt_line, sizeof(prompt_line), "%s%s", pfx, cmd);
-    terminal_add_line(term, prompt_line, COLOR_GREEN);
+    terminal_add_line(term, prompt_line, COLOR_TEXT);
+    if (term->line_count > 0)
+        term_colorize_prompt_command_line(term,
+                                          &term->lines[term->line_count - 1]);
 
     if (term->history_count < TERM_HISTORY_COUNT) {
         strncpy(term->command_history[term->history_count], cmd,
@@ -796,6 +1113,7 @@ void terminal_execute_command(terminal_t *term, const char *cmd)
     } else if (str_equal(w, "clear")) {
         term->line_count   = 0;
         term->scroll_offset = 0;
+        term->scroll_follow_bottom = true;
     } else if (str_starts_with(w, "agent ")) {
         cmd_agent(term, w + 6);
     } else if (str_equal(w, "agent")) {
@@ -812,6 +1130,12 @@ void terminal_execute_command(terminal_t *term, const char *cmd)
         cmd_history(term, w + 7);
     } else if (str_equal(w, "sysinfo")) {
         cmd_sysinfo(term);
+    } else if (str_starts_with(w, "llm ")) {
+        cmd_llm(term, w + 4);
+    } else if (str_equal(w, "llm")) {
+        cmd_llm(term, "");
+    } else if (cmd_word_is(w, "docker")) {
+        cmd_docker(term, skip_ws(w + 6));
     } else if (str_equal(w, "reboot")) {
         terminal_print(term, "Rebooting AevOS...");
         klog("reboot requested via terminal\n");
@@ -820,10 +1144,32 @@ void terminal_execute_command(terminal_t *term, const char *cmd)
                         w);
     }
 
-    int fnt_h = FONT_HEIGHT;
-    int visible_lines = (term->bounds.h - fnt_h - PADDING * 3) / fnt_h;
-    if (term->line_count > visible_lines)
-        term->scroll_offset = (term->line_count - visible_lines) * fnt_h;
+    terminal_scroll_to_bottom(term);
+}
+
+static void term_draw_compose_line(fb_ctx_t *fb, terminal_t *term, int y,
+                                   const font_t *fnt)
+{
+    int line_h = fnt->height;
+    int prompt_x = term->bounds.x + PADDING;
+    int prompt_px = term_draw_live_prompt(fb, prompt_x, y, term, fnt);
+    prompt_x += prompt_px;
+
+    int max_chars = (term->bounds.w - PADDING * 2 - prompt_px - TERM_CURSOR_W) / fnt->width;
+    if (max_chars < 1)
+        max_chars = 1;
+    int start = 0;
+    if (term->cursor_pos > max_chars)
+        start = term->cursor_pos - max_chars;
+
+    for (int i = start; i < term->input_len && (i - start) < max_chars; i++) {
+        font_draw_char(fb, prompt_x + (i - start) * fnt->width,
+                       y, term->input_buf[i],
+                       COLOR_TEXT, 0, fnt);
+    }
+
+    int cx = prompt_x + (term->cursor_pos - start) * fnt->width;
+    fb_draw_rect(cx, y, TERM_CURSOR_W, line_h, COLOR_TEXT);
 }
 
 void terminal_render(terminal_t *term, fb_ctx_t *fb)
@@ -832,72 +1178,52 @@ void terminal_render(terminal_t *term, fb_ctx_t *fb)
         return;
 
     fb_draw_rect(term->bounds.x, term->bounds.y,
-                 term->bounds.w, term->bounds.h, COLOR_BG);
-
-    fb_draw_rect(term->bounds.x, term->bounds.y,
-                 term->bounds.w, 1, COLOR_DIVIDER);
+                 term->bounds.w, term->bounds.h, TERM_LINUX_BG);
 
     const font_t *fnt = font_get_default();
     int line_h = fnt->height;
-    int input_area_h = line_h + PADDING * 2;
-    int output_area_h = term->bounds.h - input_area_h;
-    int visible_lines = output_area_h / line_h;
-    int start_line = term->scroll_offset / line_h;
+    int out_top = term->bounds.y + PADDING;
+    int view_h = term->bounds.h - PADDING * 2;
+    if (view_h < line_h)
+        view_h = line_h;
 
-    int y = term->bounds.y + PADDING;
-    for (int i = start_line;
-         i < term->line_count && (i - start_line) < visible_lines; i++) {
-        terminal_line_t *line = &term->lines[i];
-        int x = term->bounds.x + PADDING;
+    terminal_clamp_scroll(term);
 
-        for (int j = 0; j < line->len; j++) {
-            uint32_t fg = line->fg_colors[j];
-            font_draw_char(fb, x, y, line->text[j], fg, 0, fnt);
-            x += fnt->width;
+    int first_line = term->scroll_offset / line_h;
+    int total_doc_lines = term->line_count + 1;
+    int y = out_top;
+
+    for (int li = first_line; li < total_doc_lines; li++) {
+        if (y + line_h > out_top + view_h)
+            break;
+        if (li < term->line_count) {
+            terminal_line_t *line = &term->lines[li];
+            int x = term->bounds.x + PADDING;
+
+            for (int j = 0; j < line->len; j++) {
+                uint32_t fg = line->fg_colors[j];
+                font_draw_char(fb, x, y, line->text[j], fg, 0, fnt);
+                x += fnt->width;
+            }
+        } else {
+            term_draw_compose_line(fb, term, y, fnt);
         }
         y += line_h;
     }
 
-    int total_h = term->line_count * line_h;
-    if (total_h > output_area_h) {
+    if (y < out_top + view_h)
+        fb_draw_rect(term->bounds.x, y, term->bounds.w,
+                     out_top + view_h - y, TERM_LINUX_BG);
+
+    int total_h = (term->line_count + 1) * line_h;
+    if (total_h > view_h) {
         draw_scrollbar(fb,
                        term->bounds.x + term->bounds.w - 8,
-                       term->bounds.y,
-                       output_area_h,
+                       out_top,
+                       view_h,
                        term->scroll_offset,
                        total_h,
-                       output_area_h);
-    }
-
-    int input_y = term->bounds.y + term->bounds.h - input_area_h;
-    fb_draw_rect(term->bounds.x, input_y,
-                 term->bounds.w, 1, COLOR_DIVIDER);
-
-    int prompt_x = term->bounds.x + PADDING;
-    int text_y = input_y + PADDING;
-
-    char prompt_buf[TERM_LINE_LEN];
-    term_format_prompt(term, prompt_buf, sizeof(prompt_buf));
-    int prompt_px = font_measure_string(prompt_buf, fnt);
-    font_draw_string(fb, prompt_x, text_y, prompt_buf,
-                     COLOR_GREEN, 0, fnt);
-    prompt_x += prompt_px;
-
-    int max_chars = (term->bounds.w - PADDING * 2 - prompt_px) / fnt->width;
-    int start = 0;
-    if (term->cursor_pos > max_chars)
-        start = term->cursor_pos - max_chars;
-
-    for (int i = start; i < term->input_len && (i - start) < max_chars; i++) {
-        font_draw_char(fb, prompt_x + (i - start) * fnt->width,
-                       text_y, term->input_buf[i],
-                       COLOR_TEXT, 0, fnt);
-    }
-
-    term->blink_counter++;
-    if ((term->blink_counter / 30) % 2 == 0) {
-        int cx = prompt_x + (term->cursor_pos - start) * fnt->width;
-        fb_draw_rect(cx, text_y, fnt->width, fnt->height, COLOR_GREEN);
+                       view_h);
     }
 }
 
@@ -905,7 +1231,7 @@ static const char *builtin_commands[] = {
     "echo", "pwd", "cd", "export", "unset", "env", "ls",
     "bash", "sh", "true", "false", "exit", ":",
     "help", "clear", "agent", "skill", "memory",
-    "history", "sysinfo", "reboot", NULL
+    "history", "sysinfo", "llm", "docker", "reboot", NULL
 };
 
 static void terminal_tab_complete(terminal_t *term)
@@ -998,6 +1324,30 @@ bool terminal_handle_input(terminal_t *term, input_event_t *ev)
         return true;
     }
 
+    if (ev->keycode == KEY_PGUP) {
+        int lh, oah, vis;
+        term_content_height_px(term, &lh, &oah, &vis);
+        int page = vis * lh;
+        if (page < lh)
+            page = lh;
+        term->scroll_follow_bottom = false;
+        term->scroll_offset -= page;
+        terminal_clamp_scroll(term);
+        return true;
+    }
+    if (ev->keycode == KEY_PGDN) {
+        int lh, oah, vis;
+        term_content_height_px(term, &lh, &oah, &vis);
+        int page = vis * lh;
+        if (page < lh)
+            page = lh;
+        term->scroll_offset += page;
+        terminal_clamp_scroll(term);
+        if (term->scroll_offset >= term_max_scroll_px(term))
+            term->scroll_follow_bottom = true;
+        return true;
+    }
+
     if (ev->keycode == KEY_UP) {
         if (term->history_count > 0 && term->history_index > 0) {
             term->history_index--;
@@ -1042,4 +1392,20 @@ bool terminal_handle_input(terminal_t *term, input_event_t *ev)
     }
 
     return false;
+}
+
+bool terminal_handle_mouse_scroll(terminal_t *term, int32_t dy)
+{
+    if (!term || dy == 0)
+        return false;
+
+    int lh, oah, vis;
+    term_content_height_px(term, &lh, &oah, &vis);
+    term->scroll_follow_bottom = false;
+    /* Positive dy: treat as scroll toward newer lines (bottom). */
+    term->scroll_offset += (int)dy * lh * 2;
+    terminal_clamp_scroll(term);
+    if (term->scroll_offset >= term_max_scroll_px(term))
+        term->scroll_follow_bottom = true;
+    return true;
 }

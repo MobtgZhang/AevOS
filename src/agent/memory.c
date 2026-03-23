@@ -506,6 +506,32 @@ int memory_retrieve(memory_engine_t *engine, const int8_t *query_embedding,
     return found;
 }
 
+int memory_fetch_by_id(memory_engine_t *engine, uint64_t id, char *buf, size_t buf_max)
+{
+    if (!engine || !buf || buf_max == 0)
+        return -EINVAL;
+
+    spin_lock(&engine->lock);
+    int n = -ENOENT;
+    for (uint32_t i = 0; i < engine->count; i++) {
+        if (engine->entries[i].id != id)
+            continue;
+        mem_entry_t *e = &engine->entries[i];
+        if (!e->content || e->content_len == 0) {
+            n = 0;
+            buf[0] = '\0';
+        } else {
+            size_t cpy = e->content_len < buf_max - 1 ? e->content_len : buf_max - 1;
+            memcpy(buf, e->content, cpy);
+            buf[cpy] = '\0';
+            n = (int)cpy;
+        }
+        break;
+    }
+    spin_unlock(&engine->lock);
+    return n;
+}
+
 void memory_update_importance(memory_engine_t *engine, uint64_t id,
                               float new_importance) {
     if (!engine) return;

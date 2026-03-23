@@ -8,6 +8,7 @@
 #include "evolution.h"
 #include "mailbox.h"
 #include "hms_cache.h"
+#include "sep_plane.h"
 
 struct llm_ctx;
 
@@ -40,6 +41,7 @@ typedef struct agent {
     agent_tool_state_t tool_state;
     bool              cancel_req;
     evolution_state_t evolution;
+    sep_plane_t       sep;
     char             *response_buf;
     size_t            response_buf_size;
 } agent_t;
@@ -66,6 +68,7 @@ agent_t    *agent_get_active(agent_system_t *sys);
 void agent_tick(agent_t *agent);
 
 void agent_cancel_request(agent_t *agent);
+void agent_system_cancel_broadcast(agent_system_t *sys);
 
 int agent_save_state(agent_t *agent, const char *path);
 int agent_load_state(agent_t *agent, const char *path);

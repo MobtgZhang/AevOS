@@ -1,5 +1,33 @@
 #include "quantize.h"
+#include "simd_kernels.h"
 #include "lib/string.h"
+
+#if defined(__x86_64__) && defined(__AVX2__)
+#include <immintrin.h>
+
+static int32_t dot_i8x32_avx2(const int8_t *a, const int8_t *b)
+{
+    __m256i va = _mm256_loadu_si256((const __m256i *)a);
+    __m256i vb = _mm256_loadu_si256((const __m256i *)b);
+    __m128i va_lo = _mm256_castsi256_si128(va);
+    __m128i va_hi = _mm256_extracti128_si256(va, 1);
+    __m128i vb_lo = _mm256_castsi256_si128(vb);
+    __m128i vb_hi = _mm256_extracti128_si256(vb, 1);
+    __m256i al    = _mm256_cvtepi8_epi16(va_lo);
+    __m256i ah    = _mm256_cvtepi8_epi16(va_hi);
+    __m256i bl    = _mm256_cvtepi8_epi16(vb_lo);
+    __m256i bh    = _mm256_cvtepi8_epi16(vb_hi);
+    __m256i pl    = _mm256_madd_epi16(al, bl);
+    __m256i ph    = _mm256_madd_epi16(ah, bh);
+    __m256i p     = _mm256_add_epi32(pl, ph);
+    __m128i lo    = _mm256_castsi256_si128(p);
+    __m128i hi    = _mm256_extracti128_si256(p, 1);
+    __m128i s     = _mm_add_epi32(lo, hi);
+    s = _mm_hadd_epi32(s, s);
+    s = _mm_hadd_epi32(s, s);
+    return _mm_cvtsi128_si32(s);
+}
+#endif
 
 /* ── float16 ⇔ float32 conversion ──────────────────────────── */
 
@@ -153,18 +181,64 @@ void dequantize_q8_0_to_f32(const q8_0_block_t *src, float *dst, size_t n) {
 float vec_dot_q4_0_q8_0(const q4_0_block_t *a, const q8_0_block_t *b, size_t n) {
     size_t nblocks = n / QK4_0;
     float sum = 0.0f;
+#if defined(__x86_64__) && defined(__AVX2__)
+    const bool avx2 = simd_detect();
+#endif
 
     for (size_t bl = 0; bl < nblocks; bl++) {
         float da = f16_to_f32(a[bl].delta);
         float db = f16_to_f32(b[bl].delta);
         int32_t isum = 0;
 
-        for (int i = 0; i < QK4_0 / 2; i++) {
-            uint8_t packed = a[bl].nibbles[i];
-            int v0 = (packed & 0xF) - 8;
-            int v1 = ((packed >> 4) & 0xF) - 8;
-            isum += v0 * (int)b[bl].quants[2 * i];
-            isum += v1 * (int)b[bl].quants[2 * i + 1];
+#if defined(__x86_64__) && defined(__AVX2__)
+        if (avx2) {
+            int8_t aq[32];
+            for (int i = 0; i < QK4_0 / 2; i++) {
+                uint8_t packed = a[bl].nibbles[i];
+                aq[2 * i]     = (int8_t)((packed & 0xF) - 8);
+                aq[2 * i + 1] = (int8_t)((packed >> 4) - 8);
+            }
+            isum = dot_i8x32_avx2(aq, (const int8_t *)b[bl].quants);
+        } else
+#endif
+        {
+            for (int i = 0; i < QK4_0 / 2; i++) {
+                uint8_t packed = a[bl].nibbles[i];
+                int v0 = (packed & 0xF) - 8;
+                int v1 = ((packed >> 4) & 0xF) - 8;
+                isum += v0 * (int)b[bl].quants[2 * i];
+                isum += v1 * (int)b[bl].quants[2 * i + 1];
+            }
+        }
+        sum += da * db * (float)isum;
+    }
+    return sum;
+}
+
+/* ── Quantized dot product: Q8_0 · Q8_0 (weight row · activations) ─ */
+
+float vec_dot_q8_0_q8_0(const q8_0_block_t *a, const q8_0_block_t *b, size_t n) {
+    size_t nblocks = n / QK8_0;
+    float sum = 0.0f;
+#if defined(__x86_64__) && defined(__AVX2__)
+    const bool avx2 = simd_detect();
+#endif
+
+    for (size_t bl = 0; bl < nblocks; bl++) {
+        float da = f16_to_f32(a[bl].delta);
+        float db = f16_to_f32(b[bl].delta);
+        int32_t isum;
+
+#if defined(__x86_64__) && defined(__AVX2__)
+        if (avx2)
+            isum = dot_i8x32_avx2((const int8_t *)a[bl].quants,
+                                  (const int8_t *)b[bl].quants);
+        else
+#endif
+        {
+            isum = 0;
+            for (int i = 0; i < QK8_0; i++)
+                isum += (int)a[bl].quants[i] * (int)b[bl].quants[i];
         }
         sum += da * db * (float)isum;
     }

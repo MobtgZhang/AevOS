@@ -1,5 +1,6 @@
 #include "virtio_gpu.h"
 #include "pci.h"
+#include "../arch/arch.h"
 #include "../arch/io.h"
 #include "../klog.h"
 #include "../mm/pmm.h"
@@ -32,6 +33,9 @@
 #define VIRTIO_STATUS_DRIVER      2
 #define VIRTIO_STATUS_FEATURES_OK 8
 #define VIRTIO_STATUS_DRIVER_OK   4
+
+/* feature bit 32 → selector 1, bit 0 (VirtIO 1.0); required by modern QEMU virtio-pci */
+#define VIRTIO_F_VERSION_1_BIT32  1u
 
 /* ── Virtqueue ───────────────────────────────────────── */
 
@@ -199,15 +203,32 @@ static void vq_submit_chain(uint16_t head)
     gpu.avail->idx++;
     __sync_synchronize();
 
+    {
+        uint16_t qsz = vr16(gpu.common_cfg, CC_QUEUE_SIZE);
+        if (qsz == 0 || qsz > VQ_SIZE)
+            qsz = VQ_SIZE;
+        size_t dsz  = sizeof(struct virtq_desc) * qsz;
+        size_t asz  = sizeof(uint16_t) * (3 + (size_t)qsz);
+        arch_dcache_flush_range(gpu.desc, dsz);
+        arch_dcache_flush_range(gpu.avail, asz);
+    }
+
     /* Notify the device */
     vw16(gpu.notify_base, gpu.queue_notify_off * gpu.notify_off_mult, 0);
 }
 
 static void vq_wait_used(void)
 {
+    uint16_t qsz = vr16(gpu.common_cfg, CC_QUEUE_SIZE);
+    if (qsz == 0 || qsz > VQ_SIZE)
+        qsz = VQ_SIZE;
+    size_t usz = sizeof(uint16_t) * 3 +
+                 sizeof(struct virtq_used_elem) * (size_t)qsz;
+
     for (int timeout = 0; timeout < 10000000; timeout++) {
+        arch_dcache_invalidate_range(gpu.used, usz);
         __sync_synchronize();
-        if (gpu.used->idx != gpu.last_used_idx) {
+        if ((uint16_t)(gpu.used->idx - gpu.last_used_idx) != 0) {
             gpu.last_used_idx = gpu.used->idx;
             return;
         }
@@ -219,6 +240,7 @@ static void send_cmd(void *cmd, uint32_t cmd_len, void *resp, uint32_t resp_len)
 {
     memcpy(gpu.cmd_buf, cmd, cmd_len);
     memset(gpu.cmd_buf + cmd_len, 0, resp_len);
+    arch_dcache_flush_range(gpu.cmd_buf, (size_t)cmd_len + resp_len);
 
     uint16_t d0 = gpu.next_desc;
     uint16_t d1 = (d0 + 1) % VQ_SIZE;
@@ -237,8 +259,10 @@ static void send_cmd(void *cmd, uint32_t cmd_len, void *resp, uint32_t resp_len)
     vq_submit_chain(d0);
     vq_wait_used();
 
-    if (resp && resp_len > 0)
+    if (resp && resp_len > 0) {
+        arch_dcache_invalidate_range(gpu.cmd_buf + cmd_len, resp_len);
         memcpy(resp, gpu.cmd_buf + cmd_len, resp_len);
+    }
 }
 
 /* ── Capability parsing ──────────────────────────────── */
@@ -360,24 +384,45 @@ int virtio_gpu_init(uint64_t fb_phys, uint32_t width, uint32_t height)
     vw8(gpu.common_cfg, CC_DEVICE_STATUS, VIRTIO_STATUS_ACK);
     vw8(gpu.common_cfg, CC_DEVICE_STATUS, VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER);
 
-    /* Accept no special features */
+    /* VirtIO 1.0: read device features, offer a valid subset (same strategy as virtio-net). */
+    __sync_synchronize();
+    vw32(gpu.common_cfg, CC_DEVICE_FEATURE_SEL, 0);
+    __sync_synchronize();
+    uint32_t dev_f0 = vr32(gpu.common_cfg, CC_DEVICE_FEATURE);
+    vw32(gpu.common_cfg, CC_DEVICE_FEATURE_SEL, 1);
+    __sync_synchronize();
+    uint32_t dev_f1 = vr32(gpu.common_cfg, CC_DEVICE_FEATURE);
+
+    uint32_t drv_f0 = dev_f0;
+    uint32_t drv_f1 = dev_f1;
+    if (drv_f1 & VIRTIO_F_VERSION_1_BIT32)
+        drv_f1 = VIRTIO_F_VERSION_1_BIT32;
+    else
+        drv_f1 = 0;
+
     vw32(gpu.common_cfg, CC_DRIVER_FEATURE_SEL, 0);
-    vw32(gpu.common_cfg, CC_DRIVER_FEATURE, 0);
+    vw32(gpu.common_cfg, CC_DRIVER_FEATURE, drv_f0);
+    vw32(gpu.common_cfg, CC_DRIVER_FEATURE_SEL, 1);
+    vw32(gpu.common_cfg, CC_DRIVER_FEATURE, drv_f1);
 
     vw8(gpu.common_cfg, CC_DEVICE_STATUS,
         VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER | VIRTIO_STATUS_FEATURES_OK);
 
     uint8_t status = vr8(gpu.common_cfg, CC_DEVICE_STATUS);
     if (!(status & VIRTIO_STATUS_FEATURES_OK)) {
-        klog("[virtio-gpu] feature negotiation failed\n");
+        klog("[virtio-gpu] feature negotiation failed (dev_f0=%x dev_f1=%x)\n",
+             dev_f0, dev_f1);
         return -1;
     }
 
-    /* Set up virtqueue 0 (controlq) */
+    /* Set up virtqueue 0 (controlq); QueueSize is device-owned in v1 — do not write it. */
     vw16(gpu.common_cfg, CC_QUEUE_SELECT, 0);
     uint16_t qsz = vr16(gpu.common_cfg, CC_QUEUE_SIZE);
-    if (qsz == 0 || qsz > VQ_SIZE) qsz = VQ_SIZE;
-    vw16(gpu.common_cfg, CC_QUEUE_SIZE, qsz);
+    if (qsz == 0 || qsz > VQ_SIZE) {
+        klog("[virtio-gpu] bad control queue size %u (max %u)\n",
+             (unsigned)qsz, (unsigned)VQ_SIZE);
+        return -1;
+    }
 
     /* Allocate virtqueue memory (physically contiguous) */
     size_t desc_bytes  = sizeof(struct virtq_desc) * qsz;

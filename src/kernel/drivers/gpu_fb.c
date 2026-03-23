@@ -1,5 +1,6 @@
 #include "gpu_fb.h"
 #include "virtio_gpu.h"
+#include "../arch/arch.h"
 #include "../klog.h"
 #include "../mm/slab.h"
 #include "../mm/pmm.h"
@@ -431,6 +432,8 @@ void fb_swap_buffers(void)
     if (!fb.back_buffer) return;
 
     if (virtio_gpu_available()) {
+        size_t nbytes = (size_t)fb.height * fb.pitch;
+        arch_dcache_flush_range(fb.back_buffer, nbytes);
         virtio_gpu_flush(0, 0, fb.width, fb.height);
     } else if (fb.pixels) {
         size_t buf_size = (size_t)fb.height * fb.pitch;

@@ -5,6 +5,7 @@
 #include "../kernel/arch/arch.h"
 #include "../kernel/drivers/gpu_fb.h"
 #include "../kernel/drivers/hid.h"
+#include "../kernel/drivers/virtio_input.h"
 #include "../kernel/net/lwip_port.h"
 #include "../kernel/klog.h"
 #include "ws_bridge.h"
@@ -21,7 +22,8 @@ static void shell_calculate_layout(ui_shell_t *shell)
     int content_x = sidebar_w;
     int content_w = (int)screen_w - sidebar_w;
 
-    int terminal_h = shell->show_terminal ? (int)(screen_h * 30 / 100) : 0;
+    /* Chat on top, terminal docked at bottom (common assistant + shell layout). */
+    int terminal_h = shell->show_terminal ? (int)(screen_h * 40 / 100) : 0;
     int chat_h = (int)screen_h - TITLEBAR_HEIGHT - STATUSBAR_HEIGHT - terminal_h;
     int chat_y = TITLEBAR_HEIGHT;
 
@@ -83,7 +85,8 @@ void shell_init(ui_shell_t *shell, fb_ctx_t *fb, agent_t *agent)
     chat_view_add_message(&shell->chat, CHAT_ROLE_SYSTEM,
         "Welcome to AevOS v" AEVOS_VERSION_STRING
         " - Autonomous Evolving OS. "
-        "I am your AI assistant. How can I help you today?");
+        "Local GGUF is optional: use the terminal below (`llm load <path>`). "
+        "F3 switches keyboard focus between chat and terminal.");
 
     aevos_wl_compositor_init(&shell->compositor, shell);
     ui_ws_init();
@@ -100,7 +103,7 @@ void shell_layer_titlebar(ui_shell_t *shell)
     fb_draw_rect(0, TITLEBAR_HEIGHT - 1, fb->width, 1, COLOR_DIVIDER);
 
     const char *title = "AevOS v" AEVOS_VERSION_STRING
-                        " \xC4 Autonomous Evolving OS";
+                        " - Autonomous Evolving OS";
     int tw = font_measure_string(title, fnt);
     int tx = ((int)fb->width - tw) / 2;
     int ty = (TITLEBAR_HEIGHT - fnt->height) / 2;
@@ -223,6 +226,15 @@ void shell_handle_input(ui_shell_t *shell, input_event_t *ev)
             shell->mouse_y = (int32_t)(shell->fb->height - 1);
 
         shell->hover_panel = detect_hover_panel(shell);
+    }
+
+    if (ev->type == INPUT_MOUSE_SCROLL) {
+        if (shell->show_terminal &&
+            rect_contains(&shell->terminal.bounds,
+                          shell->mouse_x, shell->mouse_y)) {
+            terminal_handle_mouse_scroll(&shell->terminal, ev->mouse_dy);
+            return;
+        }
     }
 
     /* Left-click down: switch active panel and forward to widgets */
@@ -361,6 +373,7 @@ void shell_main_loop(ui_shell_t *shell)
 
     for (;;) {
         hid_poll_serial();
+        virtio_input_poll();
         net_poll();
         ui_ws_poll();
 

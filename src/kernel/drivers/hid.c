@@ -141,7 +141,6 @@ static const keycode_t extended_table[128] = {
     [0x53] = KEY_DELETE,
 };
 
-#if defined(__x86_64__)
 static void update_modifiers(keycode_t kc, bool pressed)
 {
     uint16_t bit = 0;
@@ -161,6 +160,7 @@ static void update_modifiers(keycode_t kc, bool pressed)
     else         current_modifiers &= ~bit;
 }
 
+#if defined(__x86_64__)
 static bool     kb_extended = false;
 #endif
 
@@ -343,7 +343,7 @@ void hid_init(void)
     mouse_init_ps2();
     klog("[hid] PS/2 keyboard + mouse initialized\n");
 #else
-    klog("[hid] serial console keyboard enabled\n");
+    klog("[hid] no PS/2 — use virtio-input + serial for keyboard/mouse\n");
 #endif
 }
 
@@ -535,6 +535,96 @@ void hid_set_mouse_bounds(int32_t max_x, int32_t max_y)
 {
     mouse_max_x = max_x;
     mouse_max_y = max_y;
+}
+
+void hid_feed_key(keycode_t kc, bool press)
+{
+    if (kc == KEY_NONE)
+        return;
+    update_modifiers(kc, press);
+    input_event_t ev;
+    ev.type           = press ? INPUT_KEY_PRESS : INPUT_KEY_RELEASE;
+    ev.keycode        = kc;
+    ev.scancode       = 0;
+    ev.mouse_x        = mouse_x;
+    ev.mouse_y        = mouse_y;
+    ev.mouse_dx       = 0;
+    ev.mouse_dy       = 0;
+    ev.mouse_buttons  = mouse_buttons;
+    ev.modifiers      = current_modifiers;
+    ev.button_changed = 0;
+    push_event(&ev);
+}
+
+void hid_feed_mouse_rel(int32_t dx, int32_t dy)
+{
+    if (!dx && !dy)
+        return;
+    mouse_x += dx;
+    mouse_y += dy;
+    if (mouse_x < 0) mouse_x = 0;
+    if (mouse_y < 0) mouse_y = 0;
+    if (mouse_x >= mouse_max_x) mouse_x = mouse_max_x - 1;
+    if (mouse_y >= mouse_max_y) mouse_y = mouse_max_y - 1;
+
+    input_event_t ev;
+    ev.type           = INPUT_MOUSE_MOVE;
+    ev.keycode        = KEY_NONE;
+    ev.scancode       = 0;
+    ev.mouse_x        = mouse_x;
+    ev.mouse_y        = mouse_y;
+    ev.mouse_dx       = dx;
+    ev.mouse_dy       = dy;
+    ev.mouse_buttons  = mouse_buttons;
+    ev.modifiers      = current_modifiers;
+    ev.button_changed = 0;
+    push_event(&ev);
+}
+
+void hid_feed_mouse_scroll(int32_t dy)
+{
+    if (!dy)
+        return;
+    input_event_t ev;
+    ev.type           = INPUT_MOUSE_SCROLL;
+    ev.keycode        = KEY_NONE;
+    ev.scancode       = 0;
+    ev.mouse_x        = mouse_x;
+    ev.mouse_y        = mouse_y;
+    ev.mouse_dx       = 0;
+    ev.mouse_dy       = dy;
+    ev.mouse_buttons  = mouse_buttons;
+    ev.modifiers      = current_modifiers;
+    ev.button_changed = 0;
+    push_event(&ev);
+}
+
+void hid_feed_mouse_buttons(uint8_t new_buttons)
+{
+    uint8_t old_buttons = mouse_buttons;
+    uint8_t changed     = (uint8_t)(old_buttons ^ new_buttons);
+    mouse_buttons       = new_buttons;
+
+    if (changed) {
+        for (uint8_t bit = 0; bit < 3; bit++) {
+            uint8_t mask = (uint8_t)(1u << bit);
+            if (!(changed & mask))
+                continue;
+            input_event_t ev;
+            ev.type           = (new_buttons & mask) ? INPUT_MOUSE_BTN_DOWN
+                                                     : INPUT_MOUSE_BTN_UP;
+            ev.keycode        = KEY_NONE;
+            ev.scancode       = 0;
+            ev.mouse_x        = mouse_x;
+            ev.mouse_y        = mouse_y;
+            ev.mouse_dx       = 0;
+            ev.mouse_dy       = 0;
+            ev.mouse_buttons  = new_buttons;
+            ev.modifiers      = current_modifiers;
+            ev.button_changed = mask;
+            push_event(&ev);
+        }
+    }
 }
 
 void input_get_mouse_pos(int32_t *x, int32_t *y)

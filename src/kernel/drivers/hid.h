@@ -86,6 +86,11 @@ typedef struct input_event {
 
 void hid_init(void);
 void hid_set_mouse_bounds(int32_t max_x, int32_t max_y);
+/* VirtIO input / other transports feed events here (non-PS/2 platforms). */
+void hid_feed_key(keycode_t kc, bool press);
+void hid_feed_mouse_rel(int32_t dx, int32_t dy);
+void hid_feed_mouse_scroll(int32_t dy);
+void hid_feed_mouse_buttons(uint8_t new_buttons);
 void keyboard_handler(void);
 void mouse_handler(void);
 bool input_poll(input_event_t *ev);

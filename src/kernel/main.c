@@ -18,6 +18,7 @@
 #include "drivers/ahci.h"
 #include "drivers/audio.h"
 #include "drivers/virtio_gpu.h"
+#include "drivers/virtio_input.h"
 #include "locale.h"
 #include "fs/vfs.h"
 #include "fs/procfs.h"
@@ -90,6 +91,13 @@ void NORETURN kernel_main(boot_info_t *bi)
     serial_init(SERIAL_PORT);
     print_banner();
     klog("[boot] boot_info magic ok (0x%llx)\n", bi->magic);
+    if (bi->uefi_boot_cycle_handoff > bi->uefi_boot_cycle_start) {
+        klog("[boot] L0 UEFI cycles: %llu (start=%llu → handoff=%llu)\n",
+             (unsigned long long)(bi->uefi_boot_cycle_handoff -
+                                  bi->uefi_boot_cycle_start),
+             (unsigned long long)bi->uefi_boot_cycle_start,
+             (unsigned long long)bi->uefi_boot_cycle_handoff);
+    }
     print_memory_info(bi);
 
     klog("[cpu] GDT init\n");
@@ -107,11 +115,10 @@ void NORETURN kernel_main(boot_info_t *bi)
     klog("[mm] VMM init (identity map + high half + framebuffer)\n");
     vmm_init(bi);
 
-#if defined(__aarch64__)
+#if defined(__aarch64__) || defined(__riscv)
     /*
-     * TTBR0 (bootloader identity map) pages live in EfiLoaderData which the
-     * PMM now considers free.  Switch the boot_info pointer to the
-     * PHYS_MAP_BASE mapping (TTBR1) so we no longer depend on TTBR0.
+     * AArch64: TTBR0 身份映射页在 EfiLoaderData 中，PMM 回收后不可再用。
+     * RISC-V UEFI：同样用低地址当「物理指针」，须改到 vmm 的 PHYS_MAP_BASE 线性映射。
      */
     bi = (boot_info_t *)((uintptr_t)bi + PHYS_MAP_BASE);
 #endif
@@ -135,6 +142,9 @@ void NORETURN kernel_main(boot_info_t *bi)
     pci_init();
     uint32_t pci_count = pci_get_device_count();
     klog("[pci] %u devices\n", pci_count);
+
+    if (virtio_input_init() != 0)
+        klog("[virtio-input] (optional) not present — serial/PS/2 only\n");
 
     klog("[net] network stack init\n");
     net_init();
@@ -169,38 +179,53 @@ void NORETURN kernel_main(boot_info_t *bi)
     /* Save the raw physical base before remapping for virtio-gpu backing */
     uint64_t fb_phys_base = (uint64_t)(uintptr_t)fb_handoff.base;
 
-#if defined(__aarch64__) || defined(__mips64)
+#if defined(__aarch64__) || defined(__mips64) || defined(__riscv)
     /*
-     * On aarch64/mips64, the GOP FrameBufferBase is a raw physical
-     * address.  Remap it through PHYS_MAP_BASE so access goes via
-     * the kernel's direct physical mapping segment.
+     * On aarch64/mips64/riscv64 UEFI, GOP FrameBufferBase is a raw physical
+     * address.  Remap through PHYS_MAP_BASE for the kernel direct map.
      */
     if (fb_handoff.base)
         fb_handoff.base = (uint32_t *)(uintptr_t)(PHYS_MAP_BASE + fb_phys_base);
 #endif
 
+    uint32_t gpu_width  = fb_handoff.width  ? fb_handoff.width  : 1024;
+    uint32_t gpu_height = fb_handoff.height ? fb_handoff.height : 768;
+
+    /*
+     * fb_init() ignores w/h==0. AArch64 (and some MIPS) UEFI often provides no GOP
+     * for virtio-gpu — allocate guest RAM for the desktop; scanout goes through virtio.
+     */
+    if (!fb_handoff.base || fb_handoff.width == 0 || fb_handoff.height == 0) {
+        uint64_t fb_bytes = (uint64_t)gpu_width * gpu_height * 4;
+        uint64_t fb_pages = (fb_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
+        uint64_t ram_phys = pmm_alloc_pages(fb_pages);
+        if (!ram_phys) {
+            klog("[fb] cannot allocate %llu KB RAM framebuffer (out of memory)\n",
+                 (unsigned long long)(fb_bytes / 1024));
+        } else {
+            fb_handoff.base   = (uint32_t *)(ram_phys + PHYS_MAP_BASE);
+            fb_handoff.width  = gpu_width;
+            fb_handoff.height = gpu_height;
+            fb_handoff.pitch  = gpu_width * 4;
+            fb_handoff.bpp    = 32;
+            fb_phys_base      = ram_phys;
+            klog("[fb] no usable GOP — RAM framebuffer %ux%u phys=%llx\n",
+                 gpu_width, gpu_height, (unsigned long long)ram_phys);
+        }
+    } else {
+        gpu_width  = fb_handoff.width;
+        gpu_height = fb_handoff.height;
+    }
+
     klog("[fb] Initializing framebuffer: %ux%u @ %u bpp base=%p (phys=%llx)\n",
          fb_handoff.width, fb_handoff.height, fb_handoff.bpp,
          (void *)fb_handoff.base, (unsigned long long)fb_phys_base);
 
-    /*
-     * If GOP failed (dimensions are zero), try to bring up virtio-gpu
-     * with default dimensions anyway — common on aarch64 virt where
-     * some firmware builds lack a virtio-gpu GOP driver.
-     */
-    uint32_t gpu_width  = fb_handoff.width  ? fb_handoff.width  : 1024;
-    uint32_t gpu_height = fb_handoff.height ? fb_handoff.height : 768;
-
     fb_init(&fb_handoff);
 
     /*
-     * Initialize virtio-GPU driver.
-     *
-     * On virtio-gpu platforms the GOP FrameBufferBase points to device
-     * BAR memory which cannot be used as a DMA backing store.  Instead
-     * we use the kernel-allocated back buffer (guest RAM) as the
-     * virtio-gpu resource backing.  Pipeline:
-     *   draw → back_buffer → virtio transfer+flush → display.
+     * virtio-gpu: DMA backing must be guest RAM. When GOP points at a BAR,
+     * drawing uses back_buffer from fb_init; otherwise the RAM front buffer.
      */
     klog("[gpu] probing virtio-gpu\n");
     fb_ctx_t *fb_ctx = fb_get_ctx();
@@ -212,31 +237,16 @@ void NORETURN kernel_main(boot_info_t *bi)
             gpu_backing_phys -= PHYS_MAP_BASE;
         klog("[gpu] using back_buffer as backing: phys=%llx\n",
              (unsigned long long)gpu_backing_phys);
+    } else if (fb_ctx->pixels) {
+        gpu_backing_phys = fb_ctx->phys_base;
+        klog("[gpu] using front buffer as backing: phys=%llx\n",
+             (unsigned long long)gpu_backing_phys);
     } else {
-        /*
-         * No back buffer (GOP failed or fb_init returned early).
-         * Allocate a fresh page-aligned buffer for virtio-gpu backing.
-         */
-        uint64_t fb_bytes = (uint64_t)gpu_width * gpu_height * 4;
-        uint64_t fb_pages = (fb_bytes + PAGE_SIZE - 1) / PAGE_SIZE;
-        gpu_backing_phys = pmm_alloc_pages(fb_pages);
-        if (gpu_backing_phys) {
-            uint32_t *virt = (uint32_t *)(gpu_backing_phys + PHYS_MAP_BASE);
-            memset(virt, 0, (size_t)(fb_pages * PAGE_SIZE));
-
-            fb_handoff.base   = virt;
-            fb_handoff.width  = gpu_width;
-            fb_handoff.height = gpu_height;
-            fb_handoff.pitch  = gpu_width * 4;
-            fb_handoff.bpp    = 32;
-            fb_init(&fb_handoff);
-            klog("[gpu] allocated %llu KB backing buffer at phys=%llx\n",
-                 (unsigned long long)(fb_bytes / 1024),
-                 (unsigned long long)gpu_backing_phys);
-        } else {
-            klog("[gpu] WARNING: cannot allocate GPU backing buffer\n");
-        }
+        klog("[gpu] WARNING: no drawable buffer for virtio-gpu\n");
     }
+
+    gpu_width  = fb_ctx->width  ? fb_ctx->width  : gpu_width;
+    gpu_height = fb_ctx->height ? fb_ctx->height : gpu_height;
 
     if (virtio_gpu_init(gpu_backing_phys,
                         gpu_width, gpu_height) == 0) {
@@ -246,7 +256,8 @@ void NORETURN kernel_main(boot_info_t *bi)
         klog("[gpu] virtio-gpu not available (using direct framebuffer)\n");
     }
 
-    hid_set_mouse_bounds((int32_t)fb_handoff.width, (int32_t)fb_handoff.height);
+    hid_set_mouse_bounds((int32_t)(fb_ctx->width ? fb_ctx->width : gpu_width),
+                         (int32_t)(fb_ctx->height ? fb_ctx->height : gpu_height));
 
     /* Phase 4: Filesystems and scheduling */
 
@@ -266,17 +277,15 @@ void NORETURN kernel_main(boot_info_t *bi)
 
     /* Phase 5: AI subsystem */
 
-    klog("[llm] runtime init\n");
-    klog("[llm] model %s\n", bi->cfg.model_path);
-    klog("[llm] context %u tokens\n", bi->cfg.n_ctx);
+    klog("[llm] runtime: optional local model (UI / terminal: llm load <path>)\n");
 
     memset(&g_llm_ctx, 0, sizeof(g_llm_ctx));
-    int llm_ok = llm_init(&g_llm_ctx, bi->cfg.model_path);
+    int llm_ok = llm_init(&g_llm_ctx, NULL);
+    llm_kernel_register_singleton(&g_llm_ctx);
     if (llm_ok == 0)
-        klog("[llm] ready\n");
+        klog("[llm] stub context ready (no GGUF loaded)\n");
     else
-        klog("[llm] init failed (%d), continuing without LLM\n",
-             llm_ok);
+        klog("[llm] init failed (%d)\n", llm_ok);
 
     /* Phase 6: Agent system */
 

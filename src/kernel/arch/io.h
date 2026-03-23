@@ -125,8 +125,9 @@ static inline void invlpg(uint64_t addr) {
     __asm__ volatile("sfence.vma %0, zero" : : "r"(addr));
 }
 static inline void write_cr3(uint64_t val) {
-    uint64_t satp = (8ULL << 60) | (val >> 12);
-    __asm__ volatile("csrw satp, %0\n\tsfence.vma" : : "r"(satp));
+    /* Sv48 (mode 9): 与 kernel.lds / PHYS_MAP_BASE 高半部布局一致；Sv39 无法覆盖该 VA 空间 */
+    uint64_t satp = (9ULL << 60) | ((val >> 12) & 0x00000FFFFFFFFFFFULL);
+    __asm__ volatile("csrw satp, %0\n\tsfence.vma zero, zero" : : "r"(satp) : "memory");
 }
 static inline uint64_t read_cr3(void) {
     uint64_t val;

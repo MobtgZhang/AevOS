@@ -125,6 +125,9 @@ static uint64_t decode_bar(uint8_t bus, uint8_t dev, uint8_t func, uint8_t bar_o
 #elif defined(__aarch64__)
     if (addr)
         addr += AARCH64_MMIO_BASE;
+#elif defined(__riscv)
+    if (addr)
+        addr += PHYS_MAP_BASE;
 #endif
 
     return addr;

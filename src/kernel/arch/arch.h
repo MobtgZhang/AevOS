@@ -3,8 +3,8 @@
 #include <aevos/types.h>
 
 /*
- * Architecture abstraction layer.
- * Provides common primitives that each arch implements.
+ * L1 HAL：各 arch 在 arch_init.c / io.h / *.S 中实现具体硬件原语
+ *（中断、MMU CSR、idle、协程切换）。对外仅暴露下列通用入口。
  */
 
 void arch_early_init(void);
@@ -53,4 +53,21 @@ static inline void arch_panic_stop(void){
 
 #else
 #error "Unsupported architecture"
+#endif
+
+/* DMA visibility: AArch64 needs explicit cache maintenance for virtio MMIO DMA. */
+#if defined(__aarch64__)
+void arch_dcache_flush_range(const void *addr, size_t len);
+void arch_dcache_invalidate_range(void *addr, size_t len);
+#else
+static inline void arch_dcache_flush_range(const void *addr, size_t len)
+{
+    (void)addr;
+    (void)len;
+}
+static inline void arch_dcache_invalidate_range(void *addr, size_t len)
+{
+    (void)addr;
+    (void)len;
+}
 #endif

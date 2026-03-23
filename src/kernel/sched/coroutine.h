@@ -8,6 +8,7 @@
 #define CORO_PRIORITY_MAX 255
 #define CORO_PRIORITY_LEVELS 256
 
+/* L1 协程调度四态（ideas2）：就绪 / 运行 / 阻塞等待 / 已退出待回收 */
 typedef enum {
     CORO_READY   = 0,
     CORO_RUNNING = 1,

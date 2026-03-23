@@ -115,12 +115,19 @@
 #define PCI_MMIO64_PHYS    0x8000000000ULL
 #define PCI_MMIO64_SIZE    0x10000000ULL
 #elif defined(__riscv)
+/*
+ * QEMU virt：16550 @ 0x10000000，PCIe ECAM @ 0x30000000（与 efi_main Sv48 线性映射一致）。
+ * MMIO 通过 PHYS_MAP_BASE 访问，与 pci decode_bar、内核 vmm 直接映射一致。
+ */
 #define SERIAL_PORT        0
-#define SERIAL_MMIO_BASE   0x10000000ULL
+#define SERIAL_MMIO_BASE   (PHYS_MAP_BASE + 0x10000000ULL)
 #define SERIAL_USE_PIO     0
 #define PCI_CONFIG_ADDR    0
 #define PCI_CONFIG_DATA    0
-#define PCI_ECAM_BASE      0x30000000ULL
+#define PCI_ECAM_PHYS      0x30000000ULL
+#define PCI_ECAM_SIZE      0x10000000ULL
+#define PCI_ECAM_BASE      (PHYS_MAP_BASE + PCI_ECAM_PHYS)
+#define PCI_ECAM_BUS_LIMIT 16
 #define PCI_USE_ECAM       1
 #elif defined(__loongarch64)
 #define SERIAL_PORT        0

@@ -1,13 +1,10 @@
 /*
- * AevOS UEFI Boot Stub — Multi-architecture
+ * AevOS UEFI Boot Stub — L0（ideas2）
  *
- * Responsibilities:
- *   1. Initialize GOP framebuffer
- *   2. Load kernel.elf from ESP, parse ELF segments
- *   3. Set up page tables (identity + higher-half)
- *   4. Obtain UEFI memory map
- *   5. Fill boot_info_t
- *   6. ExitBootServices, load CR3, and jump to kernel
+ *   1. GOP / boot.json / ACPI RSDP
+ *   2. Load kernel.elf，填充 boot_info（含 UEFI 阶段 cycle 计数，便于 <2s 目标度量）
+ *   3. 建立 MMU 页表：身份映射 + PHYS_MAP_BASE 线性映射（与 L1 VMM 约定一致）
+ *   4. ExitBootServices → 切换 satp/CR3/TTBR → 进入 kernel_main
  */
 
 #include "efi_types.h"
@@ -55,8 +52,6 @@ typedef struct {
 } framebuffer_t;
 
 typedef struct {
-    char     model_path[128];
-    UINT32   n_ctx;
     UINT32   n_threads;
     UINT8    use_gpu;
     UINT32   target_fps;
@@ -73,6 +68,8 @@ typedef struct {
     UINT64          kernel_phys_base;
     UINT64          kernel_size;
     UINT64          total_memory;
+    UINT64          uefi_boot_cycle_start;
+    UINT64          uefi_boot_cycle_handoff;
 } __attribute__((packed)) boot_info_t;
 
 /* ── ELF64 structures ────────────────────────────────── */
@@ -465,6 +462,122 @@ static EFI_STATUS setup_aarch64_page_tables(EFI_BOOT_SERVICES *bs,
 
 #endif /* __aarch64__ */
 
+/* ── RISC-V 64: Sv48 页表（身份 + 0xFFFFFFC000000000 线性映射）────────── */
+
+#if defined(__riscv)
+
+#define RISCV_DRAM_BASE     0x80000000ULL
+#define RISCV_PHYS_MAP_BASE 0xFFFFFFC000000000ULL
+#define RISCV_MAP_RAM_EXTRA (8ULL * 1024 * 1024 * 1024)
+#define RISCV_SATP_MODE_SV48 (9ULL << 60)
+
+#define RV_PTE_V  1ULL
+#define RV_PTE_R  2ULL
+#define RV_PTE_W  4ULL
+#define RV_PTE_X  8ULL
+#define RV_PTE_LEAF_RAM (RV_PTE_V | RV_PTE_R | RV_PTE_W | RV_PTE_X)
+
+#define RISCV_PT_POOL_MAX 64
+
+static UINTN     rv_pt_pool_count;
+static UINT64    rv_pt_pool_phys[RISCV_PT_POOL_MAX];
+
+static UINT64 *rv_alloc_pt(EFI_BOOT_SERVICES *bs, EFI_STATUS *st)
+{
+    if (rv_pt_pool_count >= RISCV_PT_POOL_MAX) {
+        *st = EFI_OUT_OF_RESOURCES;
+        return (UINT64 *)0;
+    }
+    EFI_PHYSICAL_ADDRESS p = 0;
+    *st = bs->AllocatePages(AllocateAnyPages, EfiLoaderData, 1, &p);
+    if (*st != EFI_SUCCESS)
+        return (UINT64 *)0;
+    boot_memset((void *)(UINTN)p, 0, 4096);
+    rv_pt_pool_phys[rv_pt_pool_count++] = (UINT64)p;
+    return (UINT64 *)(UINTN)p;
+}
+
+static UINT64 *rv_get_l2(EFI_BOOT_SERVICES *bs, UINT64 *root, unsigned v3,
+                         EFI_STATUS *st)
+{
+    if (!(root[v3] & RV_PTE_V)) {
+        UINT64 *t = rv_alloc_pt(bs, st);
+        if (!t)
+            return (UINT64 *)0;
+        root[v3] = (((UINTN)t >> 12) << 10) | RV_PTE_V;
+    }
+    return (UINT64 *)(UINTN)(((root[v3] >> 10) << 12));
+}
+
+/*
+ * Sv48：在 VPN[3]/VPN[2] 层安装 1 GiB 叶子项（pa、va 须 1 GiB 对齐）。
+ */
+static EFI_STATUS rv_map_1g(EFI_BOOT_SERVICES *bs, UINT64 *root, UINT64 va,
+                            UINT64 pa)
+{
+    EFI_STATUS st;
+    unsigned v3 = (unsigned)((va >> 39) & 0x1ff);
+    unsigned v2 = (unsigned)((va >> 30) & 0x1ff);
+
+    UINT64 *l2 = rv_get_l2(bs, root, v3, &st);
+    if (!l2)
+        return st;
+
+    if (l2[v2] & RV_PTE_V)
+        return EFI_SUCCESS;
+
+    l2[v2] = ((pa >> 12) << 10) | RV_PTE_LEAF_RAM;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS setup_riscv_page_tables(EFI_BOOT_SERVICES *bs, UINT64 *satp_out)
+{
+    EFI_STATUS st;
+    rv_pt_pool_count = 0;
+
+    UINT64 *root = rv_alloc_pt(bs, &st);
+    if (!root)
+        return st;
+
+    UINT64 map_end = RISCV_DRAM_BASE + RISCV_MAP_RAM_EXTRA;
+
+    for (UINT64 pa = 0; pa < map_end; pa += (1ULL << 30)) {
+        st = rv_map_1g(bs, root, pa, pa);
+        if (st != EFI_SUCCESS)
+            return st;
+        st = rv_map_1g(bs, root, RISCV_PHYS_MAP_BASE + pa, pa);
+        if (st != EFI_SUCCESS)
+            return st;
+    }
+
+    UINT64 root_pa = (UINTN)root;
+    *satp_out = RISCV_SATP_MODE_SV48 | ((root_pa >> 12) & 0x00000FFFFFFFFFFFULL);
+    return EFI_SUCCESS;
+}
+
+#endif /* __riscv */
+
+/* ── 固件内时间戳（与 boot_info 中 uefi_boot_cycle_* 对应）──────────────── */
+
+static UINT64 read_boot_cycle(void)
+{
+#if defined(__x86_64__)
+    UINT32 lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((UINT64)hi << 32) | (UINT64)lo;
+#elif defined(__aarch64__)
+    UINT64 v;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#elif defined(__riscv)
+    UINT64 v;
+    __asm__ volatile("rdtime %0" : "=r"(v));
+    return v;
+#else
+    return 0;
+#endif
+}
+
 /* ── Memory map conversion ────────────────────────────── */
 
 static mmap_type_t efi_to_aevos_memtype(UINT32 efi_type) {
@@ -568,11 +681,7 @@ static void parse_boot_json(const char *json, aevos_boot_cfg_t *cfg)
         p++;
         p = skip_ws(p);
 
-        if (boot_strcmp(key, "model_path") == 0) {
-            json_extract_str(&p, cfg->model_path, sizeof(cfg->model_path));
-        } else if (boot_strcmp(key, "n_ctx") == 0) {
-            cfg->n_ctx = (UINT32)json_extract_uint(&p);
-        } else if (boot_strcmp(key, "n_threads") == 0) {
+        if (boot_strcmp(key, "n_threads") == 0) {
             cfg->n_threads = (UINT32)json_extract_uint(&p);
         } else if (boot_strcmp(key, "use_gpu") == 0) {
             int v = json_extract_bool(&p);
@@ -690,6 +799,9 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 {
     EFI_BOOT_SERVICES *bs = st->BootServices;
     gConOut = st->ConOut;
+#if defined(__riscv)
+    UINT64 riscv_satp_val = 0;
+#endif
 
     if (gConOut) gConOut->ClearScreen(gConOut);
 
@@ -715,6 +827,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     }
     boot_info_t *bi = (boot_info_t *)(UINTN)bi_phys;
     boot_memset(bi, 0, sizeof(boot_info_t));
+    bi->uefi_boot_cycle_start = read_boot_cycle();
 
     /* 1. GOP framebuffer (aligned local; bi is packed — do not pass &bi->fb) */
     framebuffer_t fb_work;
@@ -760,13 +873,10 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     print_hex(entry_point);
     print(u"\r\n");
 
-    /* 4. Boot config — defaults, then optional \\EFI\\AevOS\\boot.json */
+    /* 4. Boot config — defaults, then optional \\EFI\\AevOS\\boot.json (no LLM path here) */
     {
-        const char model[] = "/models/default.gguf";
         aevos_boot_cfg_t cfg_work;
         boot_memset(&cfg_work, 0, sizeof(cfg_work));
-        boot_memcpy(cfg_work.model_path, model, sizeof(model));
-        cfg_work.n_ctx         = 32768;
         cfg_work.n_threads     = 4;
         cfg_work.use_gpu       = 0;
         cfg_work.target_fps    = 60;
@@ -780,10 +890,6 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
         else
             print(u"[cfg] boot.json missing, defaults\r\n");
 
-        if (cfg_work.model_path[0] == '\0')
-            boot_memcpy(cfg_work.model_path, model, sizeof(model));
-        if (cfg_work.n_ctx == 0)
-            cfg_work.n_ctx = 32768;
         if (cfg_work.n_threads == 0)
             cfg_work.n_threads = 4;
         if (cfg_work.target_fps == 0)
@@ -824,6 +930,14 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     print(u" TTBR1=");
     print_hex(ttbr1);
     print(u"\r\n");
+#elif defined(__riscv)
+    print(u"[pt] Setting up RISC-V Sv48 page tables...\r\n");
+    status = setup_riscv_page_tables(bs, &riscv_satp_val);
+    if (status != EFI_SUCCESS) {
+        print(u"FATAL: cannot set up RISC-V page tables\r\n");
+        for (;;);
+    }
+    print(u"[pt] satp (root PPN) prepared\r\n");
 #endif
 
     /* 7. Get memory map and ExitBootServices */
@@ -969,6 +1083,11 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
             : : "r"(sctlr) : "memory"
         );
     }
+#elif defined(__riscv)
+    __asm__ volatile(
+        "csrw satp, %0\n\t"
+        "sfence.vma zero, zero\n\t"
+        : : "r"(riscv_satp_val) : "memory");
 #endif
 
 #if defined(__mips64) || defined(__mips__)
@@ -1021,6 +1140,7 @@ EFI_STATUS efi_main(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 #endif
 
     /* Jump to kernel entry (now accessible through higher-half mapping) */
+    bi->uefi_boot_cycle_handoff = read_boot_cycle();
     typedef void (*kernel_entry_t)(boot_info_t *);
     kernel_entry_t entry = (kernel_entry_t)(UINTN)entry_point;
     entry(bi);

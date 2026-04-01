@@ -11,6 +11,9 @@
 ARCH ?= x86_64
 SRCDIR := src
 
+# 1=内核内嵌 GGUF 推理；0=llm_runtime 桩 + Cap-IPC 占位（用户态 LLM 服务）
+AEVOS_EMBED_LLM ?= 1
+
 # LoongArch Virt EDK2 (optional; override if firmware lives elsewhere)
 AEVOS_LOONGARCH_FW ?= /home/mobtgzhang/Firmware/LoongArchVirtMachine
 
@@ -134,7 +137,8 @@ KCFLAGS := $(CFLAGS_COMMON) \
            -ffreestanding -nostdlib -nostdinc \
            -fno-stack-protector \
            $(KCFLAGS_ARCH) \
-           -DAEVOS_KERNEL
+           -DAEVOS_KERNEL \
+           -DAEVOS_EMBED_LLM=$(AEVOS_EMBED_LLM)
 
 LIBGCC := $(shell $(CC) $(KCFLAGS_ARCH) -print-libgcc-file-name 2>/dev/null)
 KLDFLAGS := -nostdlib -static -T $(KERNEL_LDS)
@@ -188,7 +192,10 @@ POSIX_DIR    := $(SRCDIR)/posix
 LIB_DIR      := $(SRCDIR)/lib
 DB_DIR       := $(SRCDIR)/db
 CONTAINER_DIR := $(SRCDIR)/container
+LINUX_DIR     := $(SRCDIR)/linux
+IPC_DIR       := $(SRCDIR)/kernel/ipc
 EVOLUTION_DIR := $(SRCDIR)/evolution
+LLM_DIR       := $(SRCDIR)/llm
 TOOLS_DIR    := $(SRCDIR)/tools
 
 BUILD_DIR    := build/$(ARCH)
@@ -212,6 +219,23 @@ endif
 
 BOOT_OBJS := $(BOOT_COBJS) $(BOOT_RELOC_OBJ)
 
+LLM_ALWAYS_SRCS := $(LLM_DIR)/llm_api_client.c \
+                   $(LLM_DIR)/llm_tool_router.c \
+                   $(LLM_DIR)/llm_syscall.c \
+                   $(LLM_DIR)/llm_ipc.c
+
+LLM_EMBED_SRCS := $(LLM_DIR)/llm_runtime.c \
+                  $(LLM_DIR)/gguf_loader.c \
+                  $(LLM_DIR)/safetensors_loader.c \
+                  $(LLM_DIR)/quantize.c \
+                  $(LLM_DIR)/simd_kernels.c
+
+ifeq ($(AEVOS_EMBED_LLM),1)
+  LLM_KERNEL_SRCS := $(LLM_ALWAYS_SRCS) $(LLM_EMBED_SRCS)
+else
+  LLM_KERNEL_SRCS := $(LLM_ALWAYS_SRCS) $(LLM_DIR)/llm_runtime_stub.c
+endif
+
 KERNEL_CSRC := $(wildcard $(KERNEL_DIR)/*.c) \
                $(wildcard $(KERNEL_ARCH)/*.c) \
                $(wildcard $(KERNEL_MM)/*.c) \
@@ -219,13 +243,15 @@ KERNEL_CSRC := $(wildcard $(KERNEL_DIR)/*.c) \
                $(wildcard $(KERNEL_DRV)/*.c) \
                $(wildcard $(KERNEL_FS)/*.c) \
                $(wildcard $(KERNEL_NET)/*.c) \
+               $(wildcard $(IPC_DIR)/*.c) \
                $(wildcard $(AGENT_DIR)/*.c) \
-               $(wildcard $(LLM_DIR)/*.c) \
+               $(LLM_KERNEL_SRCS) \
                $(wildcard $(UI_DIR)/*.c) \
                $(wildcard $(POSIX_DIR)/*.c) \
                $(wildcard $(LIB_DIR)/*.c) \
                $(wildcard $(DB_DIR)/*.c) \
                $(wildcard $(CONTAINER_DIR)/*.c) \
+               $(wildcard $(LINUX_DIR)/*.c) \
                $(wildcard $(EVOLUTION_DIR)/*.c)
 
 KERNEL_ASRC := $(wildcard $(KERNEL_ARCH)/*.S) \
@@ -358,6 +384,8 @@ dirs:
 	@mkdir -p $(BUILD_DIR)/$(KERNEL_DRV)
 	@mkdir -p $(BUILD_DIR)/$(KERNEL_FS)
 	@mkdir -p $(BUILD_DIR)/$(KERNEL_NET)
+	@mkdir -p $(BUILD_DIR)/$(KERNEL_DIR)/ipc
+	@mkdir -p $(BUILD_DIR)/$(LINUX_DIR)
 	@mkdir -p $(BUILD_DIR)/$(AGENT_DIR)
 	@mkdir -p $(BUILD_DIR)/$(LLM_DIR)
 	@mkdir -p $(BUILD_DIR)/$(UI_DIR)
@@ -408,6 +436,7 @@ kernel: dirs $(KERNEL_ELF)
 
 $(BUILD_DIR)/%.o: %.c
 	@echo "  CC  [kern/$(ARCH)]  $<"
+	@mkdir -p $(dir $@)
 	@$(CC) $(KCFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/%.S.o: %.S
@@ -499,6 +528,7 @@ clean:
 
 info:
 	@echo "Architecture:   $(ARCH)"
+	@echo "AEVOS_EMBED_LLM:$(AEVOS_EMBED_LLM)  (0=userspace LLM IPC path)"
 	@echo "Toolchain:      $(CC)"
 	@echo "Source dir:     $(SRCDIR)"
 	@echo "Kernel LDS:     $(KERNEL_LDS)"

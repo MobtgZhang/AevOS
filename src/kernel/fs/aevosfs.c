@@ -562,3 +562,23 @@ vfs_ops_t *aevosfs_get_vfs_ops(void)
 {
     return &aevosfs_ops;
 }
+
+static uint32_t g_aevosfs_features = AEVOSFS_FEAT_JOURNAL_META;
+
+uint32_t aevosfs_feature_flags(void)
+{
+    return g_aevosfs_features;
+}
+
+int aevosfs_journal_stage_meta(const char *reason)
+{
+    klog("aevosfs: journal meta stage (%s) log_head=%llu\n",
+         reason ? reason : "null",
+         (unsigned long long)sb.log_head);
+    return 0;
+}
+
+bool aevosfs_cow_blocks_enabled(void)
+{
+    return (g_aevosfs_features & AEVOSFS_FEAT_COW_BLOCKS) != 0;
+}

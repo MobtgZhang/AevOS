@@ -13,6 +13,17 @@
 #define AEVOSFS_LOG_ENTRY_WRITE  1
 #define AEVOSFS_LOG_ENTRY_DELETE 2
 
+/* 特性标志（与 superblock 演进协同；当前运行时查询用）。 */
+#define AEVOSFS_FEAT_JOURNAL_META   (1u << 0)
+#define AEVOSFS_FEAT_COW_BLOCKS     (1u << 1)
+
+uint32_t aevosfs_feature_flags(void);
+
+/* 日志元数据阶段提交（与 evolution 快照/checkpoint 对齐的占位钩子）。 */
+int aevosfs_journal_stage_meta(const char *reason);
+
+bool aevosfs_cow_blocks_enabled(void);
+
 typedef ssize_t (*aevosfs_dev_read_fn)(uint64_t block, void *buf, size_t count);
 typedef ssize_t (*aevosfs_dev_write_fn)(uint64_t block, const void *buf, size_t count);
 

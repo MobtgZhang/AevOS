@@ -3,6 +3,7 @@
 #include "font.h"
 #include "widget.h"
 #include "../kernel/arch/arch.h"
+#include "../kernel/sched/coroutine.h"
 #include "../kernel/drivers/gpu_fb.h"
 #include "../kernel/drivers/hid.h"
 #include "../kernel/drivers/virtio_input.h"
@@ -89,6 +90,7 @@ void shell_init(ui_shell_t *shell, fb_ctx_t *fb, agent_t *agent)
         "F3 switches keyboard focus between chat and terminal.");
 
     aevos_wl_compositor_init(&shell->compositor, shell);
+    aevos_wl_service_init(&shell->wl_service);
     ui_ws_init();
 
     klog("[ui] layout ok (%ux%u) [wl-style compositor]\n", fb->width, fb->height);
@@ -99,8 +101,12 @@ void shell_layer_titlebar(ui_shell_t *shell)
     fb_ctx_t *fb = shell->fb;
     const font_t *fnt = font_get_default();
 
-    fb_draw_rect(0, 0, fb->width, TITLEBAR_HEIGHT, COLOR_SIDEBAR);
-    fb_draw_rect(0, TITLEBAR_HEIGHT - 1, fb->width, 1, COLOR_DIVIDER);
+    for (int y = 0; y < (int)TITLEBAR_HEIGHT; y++) {
+        uint8_t a = (uint8_t)(180 - (y * 120 / (int)TITLEBAR_HEIGHT));
+        uint32_t rowc = color_alpha_blend(COLOR_AERO_HIGHLIGHT, COLOR_SIDEBAR, a);
+        fb_draw_rect(0, (uint32_t)y, fb->width, 1, rowc);
+    }
+    fb_draw_rect(0, TITLEBAR_HEIGHT - 1, fb->width, 1, COLOR_AERO_RIM);
 
     const char *title = "AevOS v" AEVOS_VERSION_STRING
                         " - Autonomous Evolving OS";
@@ -175,6 +181,7 @@ void shell_render(ui_shell_t *shell)
         return;
 
     aevos_wl_compositor_present(&shell->compositor);
+    aevos_wl_service_on_present(&shell->wl_service, &shell->compositor);
 }
 
 static bool shell_is_mouse_event(input_event_type_t type)
@@ -400,6 +407,9 @@ void shell_main_loop(ui_shell_t *shell)
             last_render_tick = shell->uptime_ticks;
             shell_render(shell);
         }
+
+        if (scheduler_preempt_pending())
+            coro_yield();
 
         arch_idle();
     }

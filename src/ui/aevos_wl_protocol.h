@@ -11,6 +11,10 @@
  *
  * 线格式（建议）：每行一条 UTF-8 JSON，字段 type + payload。
  * 主机参考实现：devtools/cursor-workbench/
+ *
+ * 与标准 Wayland wire 的差距（路线图，见 wl_wire_future_stub.c）：
+ *   - 尚无 Unix 套接字对象传输、wl_display 扫描器生成协议；
+ *   - 计划子集：wl_compositor / wl_surface / wl_shm / xdg_toplevel 的 fd+opcode 映射。
  */
 
 #include <aevos/types.h>
@@ -31,6 +35,9 @@ typedef enum {
     AEVOS_WL_EVENT_POINTER_BUTTON,
     AEVOS_WL_EVENT_KEYBOARD_KEY,
     AEVOS_WL_EVENT_CONFIGURE,
+    AEVOS_WL_EVENT_FRAME_DONE,
+    AEVOS_WL_EVENT_SURFACE_DAMAGE,
+    AEVOS_WL_EVENT_OUTPUT_MODE,
 } aevos_wl_wire_event_t;
 
 typedef enum {
@@ -39,6 +46,8 @@ typedef enum {
     AEVOS_WL_REQ_SURFACE_COMMIT,
     AEVOS_WL_REQ_XDG_TOPLEVEL_SET_TITLE,
     AEVOS_WL_REQ_SUBSURFACE_PLACE_ABOVE,
+    AEVOS_WL_REQ_COMPOSITOR_PING,
+    AEVOS_WL_REQ_OUTPUT_SYNC,
 } aevos_wl_wire_request_t;
 
 /*

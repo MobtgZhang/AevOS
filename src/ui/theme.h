@@ -2,25 +2,28 @@
 
 #include <aevos/types.h>
 
-/* ── Cursor-style dark color palette ── */
+/* ── Aero-style glass desktop palette（磨砂蓝玻璃 + 高光标题栏） ── */
 
-#define COLOR_BG            0xFF0D1117
-#define COLOR_SIDEBAR       0xFF161B22
-#define COLOR_PANEL         0xFF1C2128
-#define COLOR_TEXT          0xFFE6EDF3
-#define COLOR_TEXT_DIM      0xFF8B949E
-#define COLOR_ACCENT        0xFF2188FF
+#define COLOR_AERO_HIGHLIGHT  0xFF9ECFFF
+#define COLOR_AERO_RIM        0xFF6FA8DC
+
+#define COLOR_BG            0xFF1E3A5F
+#define COLOR_SIDEBAR       0xFF243B5A
+#define COLOR_PANEL         0xFF2E4A6E
+#define COLOR_TEXT          0xFFF0F7FF
+#define COLOR_TEXT_DIM      0xFFB8C9DC
+#define COLOR_ACCENT        0xFF4DA3FF
 #define COLOR_GREEN         0xFF3FB950
 #define COLOR_RED           0xFFF85149
 #define COLOR_YELLOW        0xFFD29922
 #define COLOR_ORANGE        0xFFDB6D28
 #define COLOR_PURPLE        0xFFBC8CFF
-#define COLOR_AI_BUBBLE     0xFF1C2128
-#define COLOR_USER_BUBBLE   0xFF0D419D
-#define COLOR_INPUT_BG      0xFF0D1117
-#define COLOR_INPUT_BORDER  0xFF30363D
-#define COLOR_SCROLLBAR     0xFF484F58
-#define COLOR_DIVIDER       0xFF21262D
+#define COLOR_AI_BUBBLE     0xFF2E4A6E
+#define COLOR_USER_BUBBLE   0xFF1B5EB8
+#define COLOR_INPUT_BG      0xFF1A3048
+#define COLOR_INPUT_BORDER  0xFF5B7FA6
+#define COLOR_SCROLLBAR     0xFF6B8CAF
+#define COLOR_DIVIDER       0xFF3D5A7A
 
 /* ── Font metrics ── */
 

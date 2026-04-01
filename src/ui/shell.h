@@ -5,6 +5,7 @@
 #include "sidebar.h"
 #include "terminal.h"
 #include "wl_compositor.h"
+#include "wl_compositor_service.h"
 
 typedef struct fb_ctx fb_ctx_t;
 typedef struct input_event input_event_t;
@@ -33,7 +34,8 @@ typedef struct ui_shell {
     uint8_t                 mouse_buttons;
     bool                    mouse_visible;
     active_panel_t          hover_panel;
-    aevos_wl_compositor_t   compositor;
+    aevos_wl_compositor_t      compositor;
+    aevos_wl_service_state_t   wl_service;
 } ui_shell_t;
 
 void shell_layer_titlebar(ui_shell_t *shell);

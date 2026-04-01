@@ -1,5 +1,6 @@
 #include "evolution.h"
 #include "agent_core.h"
+#include "jit_sandbox.h"
 #include "llm/llm_runtime.h"
 #include "kernel/mm/slab.h"
 #include "kernel/klog.h"
@@ -41,6 +42,8 @@ void tcc_delete(tcc_state_t *tcc) {
  */
 int tcc_compile_string(tcc_state_t *tcc, const char *code) {
     if (!tcc || !code) return -EINVAL;
+
+    aevos_jit_sandbox_compile_enter("tcc_compile_string");
 
     size_t code_len = strlen(code);
     if (code_len == 0) {

@@ -1,5 +1,7 @@
 #include "lc_layer.h"
 #include <aevos/config.h>
+#include "kernel/klog.h"
+#include "linux/linux_abi.h"
 #include "../lib/string.h"
 
 static lc_container_slot_t g_slots[LC_MAX_CONTAINERS];
@@ -169,6 +171,12 @@ int lc_docker_run(const char *image, const char *cmdline_rest,
     char lower[160];
     lower_path_for_image(image, lower, sizeof(lower));
     lc_oci_register_bundle(s->id, image, lower);
+
+    klog("lc: OCI slot %llu linux shim read→%s domain=%d clone→domain=%d\n",
+         (unsigned long long)s->id,
+         linux_abi_x64_syscall_name(0),
+         (int)linux_syscall_dispatch_domain(0),
+         (int)linux_syscall_dispatch_domain(56));
 
     const char *cmd = (cmdline_rest && *cmdline_rest) ? cmdline_rest : "(default)";
     snprintf(msg_out, msg_cap,

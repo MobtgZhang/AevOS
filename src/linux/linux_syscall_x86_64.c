@@ -1,12 +1,10 @@
-#include "lc_layer.h"
+#include "linux_abi.h"
 #include "kernel/klog.h"
 
-struct lc_syscall_name {
+static const struct {
     uint32_t     nr;
     const char  *name;
-};
-
-static const struct lc_syscall_name g_x64_names[] = {
+} g_x64_names[] = {
     { 0,   "read" },
     { 1,   "write" },
     { 2,   "open" },
@@ -39,17 +37,23 @@ static const struct lc_syscall_name g_x64_names[] = {
     { 281, "execveat" },
 };
 
-void lc_linux_subsys_init(void)
-{
-    klog("lc: Linux x86_64 syscall name table (%u entries) + gate API\n",
-         (unsigned)ARRAY_SIZE(g_x64_names));
-}
-
-const char *lc_linux_x64_syscall_name(uint32_t nr)
+const char *linux_abi_x64_syscall_name(uint32_t nr)
 {
     for (size_t i = 0; i < ARRAY_SIZE(g_x64_names); i++) {
         if (g_x64_names[i].nr == nr)
             return g_x64_names[i].name;
     }
     return "unknown";
+}
+
+/* 供 lc_linux_x64_syscall_name 转发的稳定符号。 */
+const char *lc_linux_x64_syscall_name(uint32_t nr)
+{
+    return linux_abi_x64_syscall_name(nr);
+}
+
+void linux_compat_init(void)
+{
+    klog("linux: x86_64 syscall name table (%u entries)\n",
+         (unsigned)ARRAY_SIZE(g_x64_names));
 }

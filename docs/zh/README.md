@@ -12,7 +12,7 @@
 |--------|------|
 | **L4** | Shell：侧栏、聊天（流式 `chat_view_append_stream_chunk`）、终端、`ws_bridge` 占位 |
 | **L3** | Agent 层：左列 `EventLog`、`mailbox`、四态 `tool_state`、`scheduler_cancel_*`；右列 `src/evolution/`（Planner/Corrector/Verifier/Evolver 脚手架） |
-| **L2** | AI 基础设施：**LLM**（`llm_syscall`、`llm_api_client`）· **LC**（`src/container/`）· **HMS**（History/Memory/Skill、`hms_cache` 语义缓存 C1–C3） |
+| **L2** | AI 基础设施：**LLM**（`llm_syscall`、`llm_ipc`、`llm_api_client`）· **LC**（`src/container/` + `src/linux/`）· **HMS**（History/Memory/Skill、`hms_cache` 语义缓存 C1–C3） |
 | **L1** | 微内核：PMM/VMM、协程、VFS（含 **`/proc` `procfs`**、**`/dev` `devfs`**）、**virtio-net** |
 | **L0** | UEFI：读取 **`EFI\AevOS\boot.json`** 覆盖默认启动配置 |
 

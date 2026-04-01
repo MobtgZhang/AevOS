@@ -125,7 +125,7 @@ PMM、VMM、Slab、协程四态、VFS（含 procfs/devfs）、块设备与网络
 | 主题 | 落点 |
 |------|------|
 | L3 Self-Evolution（增量验证等） | `src/evolution/` + [evolution.md](evolution.md) |
-| L2 LC + OCI/Linux/沙箱 | `src/container/` + [container.md](container.md) |
+| L2 LC + OCI/Linux/沙箱 | `src/container/` + `src/linux/` + [container.md](container.md) |
 | L2 HMS + 语义缓存 C1–C3 | `agent/hms_cache.c` + [hms.md](hms.md) |
 | L3 四态工具 + Cancel | `agent_core.h`、`coroutine.h`、`scheduler_cancel_*` |
 | L2 双引擎 LLM | `llm_syscall.c`、`llm_api_client` + [llm-syscall.md](llm-syscall.md) |

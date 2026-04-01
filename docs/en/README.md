@@ -12,7 +12,7 @@ Aligned with `ideas/ideas2.md`: **L2** is the AI infrastructure layer (**LLM / L
 |----------|----------|
 | **L4** | Shell: sidebar, chat (streaming API), terminal, `ws_bridge` stub |
 | **L3** | Agent layer: left—`EventLog`, `mailbox`, four tool states, `scheduler_cancel_*`; right—`src/evolution/` (Planner/Corrector/Verifier/Evolver scaffold) |
-| **L2** | AI infrastructure: **LLM** (`llm_syscall`, `llm_api_client`) · **LC** (`src/container/`) · **HMS** (history/memory/skill, `hms_cache` tiers C1–C3) |
+| **L2** | AI infrastructure: **LLM** (`llm_syscall`, `llm_ipc`, `llm_api_client`) · **LC** (`src/container/` + `src/linux/`) · **HMS** (history/memory/skill, `hms_cache` tiers C1–C3) |
 | **L1** | Micro-kernel: PMM/VMM, coroutines, VFS + **`procfs`** + **`devfs`**, **virtio-net** |
 | **L0** | UEFI: parses **`EFI\AevOS\boot.json`** when present |
 

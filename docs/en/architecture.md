@@ -114,7 +114,7 @@ PMM, VMM, slab, coroutine states, VFS (procfs/devfs), storage, net, multi-arch H
 | Theme | Where |
 |-------|-------|
 | L3 self-evolution | `src/evolution/` + [evolution.md](evolution.md) |
-| L2 LC / OCI / Linux / sandbox | `src/container/` + [container.md](container.md) |
+| L2 LC / OCI / Linux / sandbox | `src/container/` + `src/linux/` + [container.md](container.md) |
 | L2 HMS + cache C1–C3 | `agent/hms_cache.c` + [hms.md](hms.md) |
 | L3 four-state tools + cancel | `agent_core.h`, `coroutine.h`, `scheduler_cancel_*` |
 | L2 dual-engine LLM | `llm_syscall.c`, `llm_api_client` + [llm-syscall.md](llm-syscall.md) |

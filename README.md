@@ -57,19 +57,20 @@ multi-tier semantic cache (see docs: tiers C1–C3, not OS “L1”).
 tool states, scheduler cancel broadcast. **Self-evolution column:** scaffold under
 `src/evolution/` (planner, corrector, verifier, evolver).
 
-**L4** — Framebuffer shell with streaming chat helpers and internal Wayland-like
-protocol (`aevos_wl_*`) for compositor-style layout.
+**L4** — Framebuffer shell with streaming chat helpers, **Aero-style** glass theming,
+and internal Wayland-like protocol (`aevos_wl_*`) for compositor-style layout.
 
 ## Directory Layout
 
 ```
 src/
 ├── boot/               UEFI bootloader
-├── kernel/             Micro-kernel (arch, mm, sched, drivers, fs, net)
+├── kernel/             Micro-kernel (arch, mm, sched, ipc, drivers, fs, net)
 ├── agent/              Agent core, eventlog, mailbox, hms_cache, history_wal, …
-├── llm/                LLM runtime, llm_syscall, llm_api_client (remote stub)
+├── llm/                LLM runtime, llm_syscall, llm_ipc, llm_api_client (remote stub)
 ├── db/                 aevos_db (in-memory; optional SQLite via third_party)
-├── container/          LC layer (sandbox, ifc, linux_subsys, oci)
+├── container/          LC layer (sandbox, ifc, oci) — Linux ABI data lives in `linux/`
+├── linux/              Linux ABI compat (syscall names, dispatch domains; FreeBSD-style split)
 ├── evolution/          L3 self-evolution scaffold (planner, corrector, verifier, evolver)
 ├── ui/                 Shell, terminal, chat, ws_bridge stub, wl protocol
 ├── posix/, lib/, tools/, include/aevos/
@@ -96,6 +97,7 @@ make
 make ARCH=aarch64
 make ARCH=riscv64
 make ARCH=loongarch64
+make AEVOS_EMBED_LLM=0   # optional: no in-kernel GGUF; llm_ipc userspace path
 make boot / kernel / image / tools
 make info
 ```

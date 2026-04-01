@@ -28,15 +28,17 @@ In the canonical stack (`ideas/ideas2.md`), **LC** is the **middle pillar** of *
 
 ---
 
-## 3. Subsystem B — Linux personality (`linux_subsys.c`)
+## 3. Subsystem B — Linux compat (`src/linux/`, migrated from `linux_subsys.c`)
 
-**Goal**: a **WSL2-like** angle—run Linux ELFs (e.g. **static musl**) by **translating syscall numbers** to AevOS syscalls or VFS ops.
+**Boundary**: **`src/container/`** keeps OCI lifecycle, syscall allowlists, and IFC. **`src/linux/`** holds **Linux ABI metadata** (x86_64 syscall name table, `linux_syscall_dispatch_*` domain routing), in a **FreeBSD linuxulator-style** split.
+
+**Goal**: run Linux ELFs (e.g. **static musl**) by **translating syscall numbers** to AevOS POSIX/VFS or user-space services (Cap-IPC roadmap).
 
 **Structure**:
 
-- **Dispatch table**: `linux_nr → aevos_handler`; unimplemented → `-ENOSYS` or emulation.  
+- **Dispatch table**: `linux_nr → dispatch_domain → stub/service`; uncovered → `LINUX_DISPATCH_ENOSYS`.  
 - **Virtual FS**: `/proc`, `/dev` from **procfs/devfs**; LC trims per-process namespaces.  
-- **Threads/signals**: can start single-threaded and grow.
+- **OCI hook**: a successful `docker run` slot logs **read/clone** syscall → domain mapping (see `lc_container.c`).
 
 **Algorithms**: hot path is **dispatch + marshalling**; avoid double copies (`iovec`-style mapping into the POSIX layer).
 
@@ -82,7 +84,7 @@ Treat **Docker** as a **heavy skill** coexisting with **lightweight coroutines**
 
 1. `lc_sandbox_init`  
 2. `lc_ifc_init`  
-3. `lc_linux_subsys_init`  
+3. `linux_compat_init` (`src/linux/`)  
 4. `lc_oci_init`  
 
 Invoked from `kernel_main` next to `evolution_plane_init`, after **VFS/POSIX/net** are up.
@@ -95,7 +97,7 @@ Invoked from `kernel_main` next to `evolution_plane_init`, after **VFS/POSIX/net
 |------|------------|
 | `sandbox.c` | Skill/ELF isolation, TinyCC path — **TBD** |
 | `ifc.c` | Labels/policies — **TBD / partial stubs** |
-| `linux_subsys.c` | Linux ABI shim — **incremental** |
+| `src/linux/*.c` | Linux ABI table + dispatch domains — **incremental** |
 | `oci_runtime.c` | OCI/overlay — **scaffold** |
 | `lc_container.c` | Aggregated container/CLI backend pieces |
 

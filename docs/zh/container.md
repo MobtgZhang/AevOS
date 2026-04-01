@@ -28,15 +28,17 @@
 
 ---
 
-## 3. 子系统 B：Linux 子系统（`linux_subsys.c`）
+## 3. 子系统 B：Linux 兼容层（`src/linux/`，原 `linux_subsys.c` 已迁入）
 
-**目标**：类似 **WSL2 的用户态视角**——在 AevOS 上运行**静态链接 musl** 等 Linux ELF，通过 **syscall 号转译** 映射到 AevOS 原生 syscall 或 VFS。
+**边界**：**`src/container/`** 保留 OCI 生命周期、沙箱白名单、IFC；**`src/linux/`** 承载 **Linux ABI 元数据**（x86_64 系统调用名表、`linux_syscall_dispatch_*` 域路由），类似 **FreeBSD 的 Linuxulator** 拆分。
+
+**目标**：在 AevOS 上运行**静态链接 musl** 等 Linux ELF，通过 **syscall 号转译** 映射到 AevOS POSIX/VFS 或用户态服务（Cap-IPC 路线图）。
 
 **结构要点**：
 
-- **转译表**：`linux_nr → aevos_handler`，未实现返回 `-ENOSYS` 或兼容层模拟。  
+- **转译表**：`linux_nr → dispatch_domain → stub/服务`；未覆盖返回 `LINUX_DISPATCH_ENOSYS`。  
 - **虚拟 FS**：`/proc`、`/dev` 由内核 **procfs/devfs** 提供；LC 负责**进程命名空间内**的路径解析与视图裁剪。  
-- **信号/线程**：可简化为单线程进程模型先行，逐步补齐。
+- **OCI 联调**：`docker run` 成功分配槽位后会打印 **read/clone** 等调用到域映射的调试日志（见 `lc_container.c`）。
 
 **算法侧**：热路径是 **dispatch + 参数封送**；需避免双重拷贝（可用 `iovec` 式接口映射到 POSIX 层）。
 
@@ -82,7 +84,7 @@
 
 1. `lc_sandbox_init`  
 2. `lc_ifc_init`  
-3. `lc_linux_subsys_init`  
+3. `linux_compat_init`（`src/linux/`）  
 4. `lc_oci_init`  
 
 由 `kernel_main` 在 `agent_system_init` 与默认 Agent 创建之后调用（与 `evolution_plane_init` 相邻），保证 **VFS/POSIX/网络** 已就绪，便于转译层挂接。
@@ -95,7 +97,7 @@
 |------|----------|
 | `sandbox.c` | Skill / ELF 隔离、TinyCC 管线 — **TBD** |
 | `ifc.c` | 标签与流策略 — **TBD / 部分桩** |
-| `linux_subsys.c` | Linux ABI shim — **渐进** |
+| `src/linux/*.c` | Linux ABI 名表 + dispatch 域 — **渐进** |
 | `oci_runtime.c` | OCI / overlay — **脚手架** |
 | `lc_container.c` | 容器相关聚合（若存在 CLI 后端等） |
 

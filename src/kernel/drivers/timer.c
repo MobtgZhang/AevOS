@@ -1,6 +1,7 @@
 #include "timer.h"
 #include "../arch/io.h"
 #include "../klog.h"
+#include "../sched/coroutine.h"
 #include <aevos/config.h>
 
 static volatile uint64_t tick_count     = 0;
@@ -144,6 +145,7 @@ void timer_handler(void)
     }
 #endif
     tick_count++;
+    scheduler_kernel_timer_tick();
 }
 
 uint64_t timer_get_ticks(void)

@@ -40,6 +40,15 @@ void     coro_sleep(uint32_t ms);
 void     coro_exit(void);
 void     scheduler_run(void);
 
+/*
+ * 硬件定时器 tick（ISR 上下文）：累计量子，请求 UI 等长协程在安全点 yield。
+ */
+void     scheduler_kernel_timer_tick(void);
+
+bool     scheduler_preempt_pending(void);
+
+void     scheduler_preempt_clear(void);
+
 /* Architecture-level cancel flag (checked by long-running coroutines). */
 void     scheduler_cancel_broadcast_set(bool active);
 bool     scheduler_cancel_requested(void);

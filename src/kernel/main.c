@@ -32,6 +32,9 @@
 #include "../agent/agent_core.h"
 #include "../evolution/evolution_plane.h"
 #include "../container/lc_layer.h"
+#include "ipc/cap_ipc.h"
+#include <aevos/llm_ipc.h>
+#include <aevos/config.h>
 #include "../ui/shell.h"
 #include "../ui/font.h"
 #include "../lib/string.h"
@@ -267,9 +270,17 @@ void NORETURN kernel_main(boot_info_t *bi)
     klog("[sched] coroutine scheduler init\n");
     coro_init();
 
+    cap_ipc_init();
+
     /* Phase 5: AI subsystem */
 
+#if AEVOS_EMBED_LLM
     klog("[llm] runtime: optional local model (UI / terminal: llm load <path>)\n");
+#else
+    klog("[llm] userspace-server mode (AEVOS_EMBED_LLM=0; no in-kernel GGUF)\n");
+#endif
+
+    llm_ipc_init();
 
     memset(&g_llm_ctx, 0, sizeof(g_llm_ctx));
     int llm_ok = llm_init(&g_llm_ctx, NULL);

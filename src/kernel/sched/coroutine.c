@@ -6,7 +6,35 @@
 
 coro_t *current_coro = NULL;
 
+static coro_t idle_coro;
+
 static volatile bool sched_cancel_broadcast;
+
+/* 协作式调度上的抢占请求：timer ISR 置位，shell 主循环调用 coro_yield。 */
+static volatile bool     sched_preempt_pending;
+static volatile uint32_t sched_ticks_since_switch;
+#define SCHED_PREEMPT_TICKS  (TIMER_FREQ_HZ / 100) /* ~10ms 量子 @1kHz */
+
+void scheduler_kernel_timer_tick(void)
+{
+    sched_ticks_since_switch++;
+    if (sched_ticks_since_switch >= SCHED_PREEMPT_TICKS) {
+        if (current_coro && current_coro != &idle_coro
+            && current_coro->state == CORO_RUNNING)
+            sched_preempt_pending = true;
+        sched_ticks_since_switch = 0;
+    }
+}
+
+bool scheduler_preempt_pending(void)
+{
+    return sched_preempt_pending;
+}
+
+void scheduler_preempt_clear(void)
+{
+    sched_preempt_pending = false;
+}
 
 void scheduler_cancel_broadcast_set(bool active)
 {
@@ -19,7 +47,6 @@ bool scheduler_cancel_requested(void)
 }
 
 static coro_t *run_queues[CORO_PRIORITY_LEVELS];
-static coro_t  idle_coro;
 static coro_t  coro_pool[MAX_COROUTINES];
 static bool    coro_used[MAX_COROUTINES];
 static uint32_t next_coro_id = 0;
@@ -208,6 +235,7 @@ coro_t *coro_create(const char *name, coro_fn_t fn, void *arg, uint8_t priority)
 
 void coro_yield(void)
 {
+    scheduler_preempt_clear();
     coro_t *prev = current_coro;
     if (prev->state == CORO_RUNNING)
         prev->state = CORO_READY;
@@ -225,6 +253,7 @@ void coro_yield(void)
 
     next->state = CORO_RUNNING;
     current_coro = next;
+    sched_ticks_since_switch = 0;
     coro_switch(&prev->rsp, next->rsp);
 }
 
@@ -269,7 +298,9 @@ void scheduler_run(void)
 
         next->state = CORO_RUNNING;
         current_coro = next;
-        if (next != prev)
+        if (next != prev) {
+            sched_ticks_since_switch = 0;
             coro_switch(&prev->rsp, next->rsp);
+        }
     }
 }

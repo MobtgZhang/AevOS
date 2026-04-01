@@ -1,4 +1,6 @@
 #include <aevos/llm_syscall.h>
+#include <aevos/config.h>
+#include <aevos/llm_ipc.h>
 #include "llm_runtime.h"
 #include "llm_api_client.h"
 #include "llm_tool_router.h"
@@ -15,6 +17,14 @@ int llm_sys_infer(struct llm_ctx *local_ctx, const llm_infer_request_t *req,
         if (r == 0 || r != -ENOTSUP)
             return r;
     }
+
+#if !AEVOS_EMBED_LLM
+    {
+        int ir = llm_ipc_try_infer(req, output, out_size);
+        if (ir == 0)
+            return 0;
+    }
+#endif
 
     if (!local_ctx || !req->prompt)
         return -EINVAL;

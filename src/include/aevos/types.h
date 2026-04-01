@@ -94,3 +94,4 @@ static inline bool spin_try_lock(spinlock_t *lock) {
 #define EROFS           14
 #define ETIMEDOUT       15
 #define ENOTFOUND       16
+#define EAGAIN          17

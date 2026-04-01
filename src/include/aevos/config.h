@@ -159,3 +159,8 @@
 #define SKILL_SUCCESS_THRESHOLD  0.6f
 #define SKILL_MIN_CALLS_EVAL     10
 #define SKILL_AUTO_EVOLVE_COOLDOWN_MS 60000
+
+/* 1=内核链接完整 GGUF 推理；0=仅桩 + llm_ipc 用户态服务路径（make AEVOS_EMBED_LLM=0） */
+#ifndef AEVOS_EMBED_LLM
+#define AEVOS_EMBED_LLM 1
+#endif
